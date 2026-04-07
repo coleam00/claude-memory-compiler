@@ -16,6 +16,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -117,8 +118,14 @@ def main() -> None:
 
     transcript_path = Path(transcript_path_str)
     if not transcript_path.exists():
-        logging.info("SKIP: transcript missing: %s", transcript_path_str)
-        return
+        for attempt in range(10):
+            time.sleep(0.5)
+            if transcript_path.exists():
+                logging.info("Transcript found after %d retries", attempt + 1)
+                break
+        else:
+            logging.info("SKIP: transcript missing after retries: %s", transcript_path_str)
+            return
 
     # Extract conversation context in the hook (fast, no API calls)
     try:
