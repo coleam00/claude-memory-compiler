@@ -41,7 +41,23 @@ uv run python scripts/query.py "question"            # ask the knowledge base
 uv run python scripts/query.py "question" --file-back # ask + save answer back
 uv run python scripts/lint.py                        # run health checks
 uv run python scripts/lint.py --structural-only      # free structural checks only
+uv run python scripts/batch-flush.py --dry-run       # seed KB from past transcripts
 ```
+
+## Seeding the Knowledge Base from Past Conversations
+
+If you've already been using Claude Code on a project for a while, `batch-flush.py` extracts knowledge from your existing JSONL transcripts (under `~/.claude/projects/<project>/`) so the KB starts with real context instead of empty. It parses every transcript, chunks large sessions at user-message boundaries (not just the last 30 turns like the live hook), runs LLM extraction on each chunk, and writes everything into dated daily logs ready for `compile.py`.
+
+```bash
+uv run python scripts/batch-flush.py --dry-run            # preview — shows sessions, chunks, est. cost
+uv run python scripts/batch-flush.py                       # run full extraction
+uv run python scripts/batch-flush.py --max-cost 5.00       # stop after $5 spent
+uv run python scripts/batch-flush.py --dates 2026-04-11    # only specific dates
+uv run python scripts/batch-flush.py --resume              # skip sessions already processed
+uv run python scripts/batch-flush.py --compile             # extract + trigger compile
+```
+
+The script auto-discovers the transcripts directory from `cwd`; override with `--transcripts-dir`. Resumes via `state.json`, so interruptions are safe.
 
 ## Why No RAG?
 
