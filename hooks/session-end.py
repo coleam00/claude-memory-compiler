@@ -99,7 +99,7 @@ def main() -> None:
         try:
             hook_input: dict = json.loads(raw_input)
         except json.JSONDecodeError:
-            fixed_input = re.sub(r'(?<!\\)\\(?!["\\])', r'\\\\', raw_input)
+            fixed_input = re.sub(r'(?<!\\)\\(?!["\\])', r"\\\\", raw_input)
             hook_input = json.loads(fixed_input)
     except (json.JSONDecodeError, ValueError, EOFError) as e:
         logging.error("Failed to parse stdin: %s", e)
@@ -165,7 +165,12 @@ def main() -> None:
             stderr=subprocess.DEVNULL,
             creationflags=creation_flags,
         )
-        logging.info("Spawned flush.py for session %s (%d turns, %d chars)", session_id, turn_count, len(context))
+        logging.info(
+            "Spawned flush.py for session %s (%d turns, %d chars)",
+            session_id,
+            turn_count,
+            len(context),
+        )
     except Exception as e:
         logging.error("Failed to spawn flush.py: %s", e)
 
