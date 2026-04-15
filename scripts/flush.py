@@ -30,6 +30,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DAILY_DIR = ROOT / "daily"
 SCRIPTS_DIR = ROOT / "scripts"
 STATE_FILE = SCRIPTS_DIR / "last-flush.json"
+COMPILE_STATE_FILE = SCRIPTS_DIR / "state.json"
 FLUSH_STATE_LOCK_FILE = SCRIPTS_DIR / "last-flush.lock"
 LOG_FILE = SCRIPTS_DIR / "flush.log"
 
@@ -44,13 +45,18 @@ logging.basicConfig(
 )
 
 
+def load_json_state(path: Path) -> dict:
+    if not path.exists():
+        return {}
+
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
 def load_flush_state() -> dict:
-    if STATE_FILE.exists():
-        try:
-            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
-    return {}
+    return load_json_state(STATE_FILE)
 
 
 def save_flush_state(state: dict) -> None:
@@ -153,13 +159,7 @@ FLUSH_STATE_LOCK_POLL_SECONDS = 0.05
 
 
 def load_compile_state() -> dict:
-    compile_state_file = SCRIPTS_DIR / "state.json"
-    if compile_state_file.exists():
-        try:
-            return json.loads(compile_state_file.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
-    return {}
+    return load_json_state(COMPILE_STATE_FILE)
 
 
 def has_pending_daily_log_changes(now: datetime, compile_state: dict) -> bool:
@@ -169,18 +169,18 @@ def has_pending_daily_log_changes(now: datetime, compile_state: dict) -> bool:
     if not log_path.exists():
         return False
 
-    ingested = compile_state.get("ingested", {})
-    if today_log in ingested:
-        from hashlib import sha256
+    compiled_entry = compile_state.get("ingested", {}).get(today_log)
+    if compiled_entry is None:
+        return True
 
-        try:
-            current_hash = sha256(log_path.read_bytes()).hexdigest()[:16]
-        except OSError:
-            return True
-        if ingested[today_log].get("hash") == current_hash:
-            return False
+    from hashlib import sha256
 
-    return True
+    try:
+        current_hash = sha256(log_path.read_bytes()).hexdigest()[:16]
+    except OSError:
+        return True
+
+    return compiled_entry.get("hash") != current_hash
 
 
 def get_last_successful_compile_at(compile_state: dict) -> datetime | None:
@@ -280,9 +280,13 @@ def record_flush_state(session_id: str, session_timestamp: float) -> None:
             return
 
         state = load_flush_state()
-        state["session_id"] = session_id
-        state["timestamp"] = session_timestamp
+        update_session_state(state, session_id, session_timestamp)
         save_flush_state(state)
+
+
+def update_session_state(state: dict, session_id: str, session_timestamp: float) -> None:
+    state["session_id"] = session_id
+    state["timestamp"] = session_timestamp
 
 
 def maybe_trigger_compilation(session_id: str, session_timestamp: float) -> None:
@@ -297,6 +301,7 @@ def maybe_trigger_compilation(session_id: str, session_timestamp: float) -> None
         return
 
     last_compile_at = get_last_successful_compile_at(compile_state)
+    compile_age_seconds = None
     if last_compile_at is not None:
         compile_age_seconds = (now_utc - last_compile_at).total_seconds()
         if compile_age_seconds < AUTO_COMPILE_STALE_AFTER_SECONDS:
@@ -328,14 +333,13 @@ def maybe_trigger_compilation(session_id: str, session_timestamp: float) -> None
             return
 
         try:
-            log_handle = open(str(SCRIPTS_DIR / "compile.log"), "a", encoding="utf-8")
-            _sp.Popen(cmd, stdout=log_handle, stderr=_sp.STDOUT, cwd=str(ROOT), **kwargs)
+            with open(SCRIPTS_DIR / "compile.log", "a", encoding="utf-8") as log_handle:
+                _sp.Popen(cmd, stdout=log_handle, stderr=_sp.STDOUT, cwd=str(ROOT), **kwargs)
         except Exception as e:
             logging.error("Failed to spawn compile.py: %s", e)
             return
 
-        state["session_id"] = session_id
-        state["timestamp"] = session_timestamp
+        update_session_state(state, session_id, session_timestamp)
         state[AUTO_COMPILE_TRIGGER_KEY] = time.time()
         save_flush_state(state)
 
@@ -346,7 +350,7 @@ def maybe_trigger_compilation(session_id: str, session_timestamp: float) -> None
     else:
         logging.info(
             "Auto-compilation triggered for stale pending changes; last successful compile was %.1f hours ago",
-            (now_utc - last_compile_at).total_seconds() / 3600,
+            compile_age_seconds / 3600,
         )
 
 
