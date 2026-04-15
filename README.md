@@ -17,7 +17,7 @@ The agent will:
 2. Copy `.claude/settings.json` into your project (or merge the hooks into your existing settings)
 3. The hooks activate automatically next time you open Claude Code
 
-From there, your conversations start accumulating. After 6 PM local time, the next session flush automatically triggers compilation of that day's logs into knowledge articles. You can also run `uv run python scripts/compile.py` manually at any time.
+From there, your conversations start accumulating. When a flush sees pending daily-log changes and the last successful compile is stale, it automatically triggers background compilation of the changed logs into knowledge articles. You can also run `uv run python scripts/compile.py` manually at any time.
 
 ## How It Works
 
@@ -28,7 +28,7 @@ Conversation -> SessionEnd/PreCompact hooks -> flush.py extracts knowledge
 ```
 
 - **Hooks** capture conversations automatically (session end + pre-compaction safety net)
-- **flush.py** calls the Claude Agent SDK to decide what's worth saving, and after 6 PM triggers end-of-day compilation automatically
+- **flush.py** calls the Claude Agent SDK to decide what's worth saving, and automatically triggers background compilation when pending changes need a stale knowledge base refreshed
 - **compile.py** turns daily logs into organized concept articles with cross-references (triggered automatically or run manually)
 - **query.py** answers questions using index-guided retrieval (no RAG needed at personal scale)
 - **lint.py** runs 7 health checks (broken links, orphans, contradictions, staleness)

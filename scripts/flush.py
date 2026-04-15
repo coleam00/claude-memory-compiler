@@ -13,6 +13,7 @@ from __future__ import annotations
 
 # Recursion prevention: set this BEFORE any imports that might trigger Claude
 import os
+
 os.environ["CLAUDE_INVOKED_BY"] = "memory_flush"
 
 import asyncio
@@ -20,6 +21,8 @@ import json
 import logging
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,6 +30,8 @@ ROOT = Path(__file__).resolve().parent.parent
 DAILY_DIR = ROOT / "daily"
 SCRIPTS_DIR = ROOT / "scripts"
 STATE_FILE = SCRIPTS_DIR / "last-flush.json"
+COMPILE_STATE_FILE = SCRIPTS_DIR / "state.json"
+FLUSH_STATE_LOCK_FILE = SCRIPTS_DIR / "last-flush.lock"
 LOG_FILE = SCRIPTS_DIR / "flush.log"
 
 # Set up file-based logging so we can verify the background process ran.
@@ -40,13 +45,18 @@ logging.basicConfig(
 )
 
 
+def load_json_state(path: Path) -> dict:
+    if not path.exists():
+        return {}
+
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
 def load_flush_state() -> dict:
-    if STATE_FILE.exists():
-        try:
-            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
-    return {}
+    return load_json_state(STATE_FILE)
 
 
 def save_flush_state(state: dict) -> None:
@@ -133,46 +143,173 @@ respond with exactly: FLUSH_OK
                 pass
     except Exception as e:
         import traceback
+
         logging.error("Agent SDK error: %s\n%s", e, traceback.format_exc())
         response = f"FLUSH_ERROR: {type(e).__name__}: {e}"
 
     return response
 
 
-COMPILE_AFTER_HOUR = 18  # 6 PM local time
+AUTO_COMPILE_STALE_AFTER_SECONDS = 24 * 60 * 60
+AUTO_COMPILE_COOLDOWN_SECONDS = 15 * 60
+AUTO_COMPILE_TRIGGER_KEY = "auto_compile_triggered_at"
+FLUSH_STATE_LOCK_STALE_SECONDS = 5 * 60
+FLUSH_STATE_LOCK_WAIT_SECONDS = 2.0
+FLUSH_STATE_LOCK_POLL_SECONDS = 0.05
 
 
-def maybe_trigger_compilation() -> None:
-    """If it's past the compile hour and today's log hasn't been compiled, run compile.py."""
-    import subprocess as _sp
+def load_compile_state() -> dict:
+    return load_json_state(COMPILE_STATE_FILE)
 
-    now = datetime.now(timezone.utc).astimezone()
-    if now.hour < COMPILE_AFTER_HOUR:
+
+def has_pending_daily_log_changes(now: datetime, compile_state: dict) -> bool:
+    """Return whether today's daily log differs from the last compiled hash."""
+    today_log = f"{now.strftime('%Y-%m-%d')}.md"
+    log_path = DAILY_DIR / today_log
+    if not log_path.exists():
+        return False
+
+    compiled_entry = compile_state.get("ingested", {}).get(today_log)
+    if compiled_entry is None:
+        return True
+
+    from hashlib import sha256
+
+    try:
+        current_hash = sha256(log_path.read_bytes()).hexdigest()[:16]
+    except OSError:
+        return True
+
+    return compiled_entry.get("hash") != current_hash
+
+
+def get_last_successful_compile_at(compile_state: dict) -> datetime | None:
+    """Return the most recent successful compile timestamp from state.json."""
+    latest_compile = None
+
+    for entry in compile_state.get("ingested", {}).values():
+        compiled_at = entry.get("compiled_at")
+        if not compiled_at:
+            continue
+
+        try:
+            compile_time = datetime.fromisoformat(compiled_at)
+        except ValueError:
+            continue
+
+        if compile_time.tzinfo is None:
+            compile_time = compile_time.replace(tzinfo=timezone.utc)
+        else:
+            compile_time = compile_time.astimezone(timezone.utc)
+
+        if latest_compile is None or compile_time > latest_compile:
+            latest_compile = compile_time
+
+    return latest_compile
+
+
+def clear_stale_flush_state_lock() -> bool:
+    """Remove an abandoned flush-state lock file."""
+    try:
+        stale_for = time.time() - FLUSH_STATE_LOCK_FILE.stat().st_mtime
+    except FileNotFoundError:
+        return True
+    except OSError as e:
+        logging.warning("Failed to inspect flush-state lock: %s", e)
+        return False
+
+    if stale_for < FLUSH_STATE_LOCK_STALE_SECONDS:
+        return False
+
+    try:
+        FLUSH_STATE_LOCK_FILE.unlink()
+    except FileNotFoundError:
+        return True
+    except OSError as e:
+        logging.warning("Failed to clear stale flush-state lock: %s", e)
+        return False
+
+    logging.warning("Removed stale flush-state lock after %.1f seconds", stale_for)
+    return True
+
+
+@contextmanager
+def claim_flush_state_lock() -> Iterator[bool]:
+    """Serialize writes to last-flush.json across concurrent flush processes."""
+    deadline = time.monotonic() + FLUSH_STATE_LOCK_WAIT_SECONDS
+
+    while True:
+        try:
+            fd = os.open(
+                FLUSH_STATE_LOCK_FILE,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+            )
+        except FileExistsError:
+            if clear_stale_flush_state_lock():
+                continue
+            if time.monotonic() >= deadline:
+                logging.warning("Timed out waiting for flush-state lock")
+                yield False
+                return
+            time.sleep(FLUSH_STATE_LOCK_POLL_SECONDS)
+            continue
+        except OSError as e:
+            logging.warning("Failed to acquire flush-state lock: %s", e)
+            yield False
+            return
+
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as lock_handle:
+                lock_handle.write(f"{os.getpid()} {time.time()}\n")
+            yield True
+        finally:
+            try:
+                FLUSH_STATE_LOCK_FILE.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                logging.warning("Failed to release flush-state lock: %s", e)
         return
 
-    # Check if today's log has already been compiled
-    today_log = f"{now.strftime('%Y-%m-%d')}.md"
-    compile_state_file = SCRIPTS_DIR / "state.json"
-    if compile_state_file.exists():
-        try:
-            compile_state = json.loads(compile_state_file.read_text(encoding="utf-8"))
-            ingested = compile_state.get("ingested", {})
-            if today_log in ingested:
-                # Already compiled today - check if the log has changed since
-                from hashlib import sha256
-                log_path = DAILY_DIR / today_log
-                if log_path.exists():
-                    current_hash = sha256(log_path.read_bytes()).hexdigest()[:16]
-                    if ingested[today_log].get("hash") == current_hash:
-                        return  # log unchanged since last compile
-        except (json.JSONDecodeError, OSError):
-            pass
+
+def record_flush_state(session_id: str, session_timestamp: float) -> None:
+    """Persist the latest flushed session without clobbering cooldown metadata."""
+    with claim_flush_state_lock() as claimed:
+        if not claimed:
+            return
+
+        state = load_flush_state()
+        update_session_state(state, session_id, session_timestamp)
+        save_flush_state(state)
+
+
+def update_session_state(state: dict, session_id: str, session_timestamp: float) -> None:
+    state["session_id"] = session_id
+    state["timestamp"] = session_timestamp
+
+
+def maybe_trigger_compilation(session_id: str, session_timestamp: float) -> None:
+    """Trigger background compilation when pending changes are stale enough."""
+    import subprocess as _sp
+
+    now_utc = datetime.now(timezone.utc)
+    now = now_utc.astimezone()
+    compile_state = load_compile_state()
+
+    if not has_pending_daily_log_changes(now, compile_state):
+        return
+
+    last_compile_at = get_last_successful_compile_at(compile_state)
+    compile_age_seconds = None
+    if last_compile_at is not None:
+        compile_age_seconds = (now_utc - last_compile_at).total_seconds()
+        if compile_age_seconds < AUTO_COMPILE_STALE_AFTER_SECONDS:
+            return
 
     compile_script = SCRIPTS_DIR / "compile.py"
     if not compile_script.exists():
         return
-
-    logging.info("End-of-day compilation triggered (after %d:00)", COMPILE_AFTER_HOUR)
 
     cmd = ["uv", "run", "--directory", str(ROOT), "python", str(compile_script)]
 
@@ -182,11 +319,39 @@ def maybe_trigger_compilation() -> None:
     else:
         kwargs["start_new_session"] = True
 
-    try:
-        log_handle = open(str(SCRIPTS_DIR / "compile.log"), "a")
-        _sp.Popen(cmd, stdout=log_handle, stderr=_sp.STDOUT, cwd=str(ROOT), **kwargs)
-    except Exception as e:
-        logging.error("Failed to spawn compile.py: %s", e)
+    with claim_flush_state_lock() as claimed:
+        if not claimed:
+            return
+
+        state = load_flush_state()
+        try:
+            last_triggered_at = float(state.get(AUTO_COMPILE_TRIGGER_KEY, 0))
+        except (TypeError, ValueError):
+            last_triggered_at = 0.0
+
+        if time.time() - last_triggered_at < AUTO_COMPILE_COOLDOWN_SECONDS:
+            return
+
+        try:
+            with open(SCRIPTS_DIR / "compile.log", "a", encoding="utf-8") as log_handle:
+                _sp.Popen(cmd, stdout=log_handle, stderr=_sp.STDOUT, cwd=str(ROOT), **kwargs)
+        except Exception as e:
+            logging.error("Failed to spawn compile.py: %s", e)
+            return
+
+        update_session_state(state, session_id, session_timestamp)
+        state[AUTO_COMPILE_TRIGGER_KEY] = time.time()
+        save_flush_state(state)
+
+    if last_compile_at is None:
+        logging.info(
+            "Auto-compilation triggered for pending changes with no prior successful compile"
+        )
+    else:
+        logging.info(
+            "Auto-compilation triggered for stale pending changes; last successful compile was %.1f hours ago",
+            compile_age_seconds / 3600,
+        )
 
 
 def main():
@@ -205,10 +370,7 @@ def main():
 
     # Deduplication: skip if same session was flushed within 60 seconds
     state = load_flush_state()
-    if (
-        state.get("session_id") == session_id
-        and time.time() - state.get("timestamp", 0) < 60
-    ):
+    if state.get("session_id") == session_id and time.time() - state.get("timestamp", 0) < 60:
         logging.info("Skipping duplicate flush for session %s", session_id)
         context_file.unlink(missing_ok=True)
         return
@@ -228,9 +390,7 @@ def main():
     # Append to daily log
     if "FLUSH_OK" in response:
         logging.info("Result: FLUSH_OK")
-        append_to_daily_log(
-            "FLUSH_OK - Nothing worth saving from this session", "Memory Flush"
-        )
+        append_to_daily_log("FLUSH_OK - Nothing worth saving from this session", "Memory Flush")
     elif "FLUSH_ERROR" in response:
         logging.error("Result: %s", response)
         append_to_daily_log(response, "Memory Flush")
@@ -238,15 +398,15 @@ def main():
         logging.info("Result: saved to daily log (%d chars)", len(response))
         append_to_daily_log(response, "Session")
 
-    # Update dedup state
-    save_flush_state({"session_id": session_id, "timestamp": time.time()})
+    flush_timestamp = time.time()
+    record_flush_state(session_id, flush_timestamp)
 
     # Clean up context file
     context_file.unlink(missing_ok=True)
 
-    # End-of-day auto-compilation: if it's past the compile hour and today's
-    # log hasn't been compiled yet, trigger compile.py in the background.
-    maybe_trigger_compilation()
+    # Trigger background compilation when today's log changed and the last
+    # successful compile is stale enough to warrant a refresh.
+    maybe_trigger_compilation(session_id, flush_timestamp)
 
     logging.info("Flush complete for session %s", session_id)
 

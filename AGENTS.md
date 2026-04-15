@@ -376,7 +376,7 @@ This ensures flush.py survives after Claude Code's hook process exits.
 5. Claude decides what's worth saving - returns structured bullet points or `FLUSH_OK`
 6. Appends result to `daily/YYYY-MM-DD.md`
 7. Cleans up temp context file
-8. **End-of-day auto-compilation:** If it's past 6 PM local time (`COMPILE_AFTER_HOUR = 18`) and today's daily log has changed since its last compilation (hash comparison against `state.json`), spawns `compile.py` as another detached background process. This means compilation happens automatically once a day without needing a cron job or manual trigger.
+8. **Stale auto-compilation:** If today's daily log has changed since its last compilation and the most recent successful compile recorded in `state.json` is older than 24 hours or missing, `flush.py` spawns `compile.py` as another detached background process. `last-flush.json` also stores a recent auto-compile trigger timestamp so repeated flushes do not fan out into overlapping compile processes.
 
 ### JSONL Transcript Format
 
@@ -472,7 +472,7 @@ Reports saved to `reports/lint-YYYY-MM-DD.md`.
 - `last_lint` - timestamp of most recent lint
 - `total_cost` - cumulative API cost
 
-`scripts/last-flush.json` tracks flush deduplication (session_id + timestamp).
+`scripts/last-flush.json` tracks flush deduplication (`session_id` + `timestamp`) plus `auto_compile_triggered_at`, a cooldown timestamp used to suppress duplicate background compile triggers.
 
 Both are gitignored and regenerated automatically.
 

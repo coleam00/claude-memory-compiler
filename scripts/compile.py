@@ -114,8 +114,8 @@ Read the daily log above and compile it into wiki articles following the schema 
 ### File paths:
 - Write concept articles to: {CONCEPTS_DIR}
 - Write connection articles to: {CONNECTIONS_DIR}
-- Update index at: {KNOWLEDGE_DIR / 'index.md'}
-- Append log at: {KNOWLEDGE_DIR / 'log.md'}
+- Update index at: {KNOWLEDGE_DIR / "index.md"}
+- Append log at: {KNOWLEDGE_DIR / "log.md"}
 
 ### Quality standards:
 - Every article must have complete YAML frontmatter
@@ -213,7 +213,7 @@ def main():
         print(f"\n[{i}/{len(to_compile)}] Compiling {log_path.name}...")
         cost = asyncio.run(compile_daily_log(log_path, state))
         total_cost += cost
-        print(f"  Done.")
+        print("  Done.")
 
     articles = list_wiki_articles()
     print(f"\nCompilation complete. Total cost: ${total_cost:.2f}")
