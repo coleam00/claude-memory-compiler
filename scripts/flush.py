@@ -21,6 +21,8 @@ import json
 import logging
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,6 +30,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DAILY_DIR = ROOT / "daily"
 SCRIPTS_DIR = ROOT / "scripts"
 STATE_FILE = SCRIPTS_DIR / "last-flush.json"
+FLUSH_STATE_LOCK_FILE = SCRIPTS_DIR / "last-flush.lock"
 LOG_FILE = SCRIPTS_DIR / "flush.log"
 
 # Set up file-based logging so we can verify the background process ran.
@@ -144,6 +147,9 @@ respond with exactly: FLUSH_OK
 AUTO_COMPILE_STALE_AFTER_SECONDS = 24 * 60 * 60
 AUTO_COMPILE_COOLDOWN_SECONDS = 15 * 60
 AUTO_COMPILE_TRIGGER_KEY = "auto_compile_triggered_at"
+FLUSH_STATE_LOCK_STALE_SECONDS = 5 * 60
+FLUSH_STATE_LOCK_WAIT_SECONDS = 2.0
+FLUSH_STATE_LOCK_POLL_SECONDS = 0.05
 
 
 def load_compile_state() -> dict:
@@ -202,7 +208,84 @@ def get_last_successful_compile_at(compile_state: dict) -> datetime | None:
     return latest_compile
 
 
-def maybe_trigger_compilation(flush_state: dict | None = None) -> None:
+def clear_stale_flush_state_lock() -> bool:
+    """Remove an abandoned flush-state lock file."""
+    try:
+        stale_for = time.time() - FLUSH_STATE_LOCK_FILE.stat().st_mtime
+    except FileNotFoundError:
+        return True
+    except OSError as e:
+        logging.warning("Failed to inspect flush-state lock: %s", e)
+        return False
+
+    if stale_for < FLUSH_STATE_LOCK_STALE_SECONDS:
+        return False
+
+    try:
+        FLUSH_STATE_LOCK_FILE.unlink()
+    except FileNotFoundError:
+        return True
+    except OSError as e:
+        logging.warning("Failed to clear stale flush-state lock: %s", e)
+        return False
+
+    logging.warning("Removed stale flush-state lock after %.1f seconds", stale_for)
+    return True
+
+
+@contextmanager
+def claim_flush_state_lock() -> Iterator[bool]:
+    """Serialize writes to last-flush.json across concurrent flush processes."""
+    deadline = time.monotonic() + FLUSH_STATE_LOCK_WAIT_SECONDS
+
+    while True:
+        try:
+            fd = os.open(
+                FLUSH_STATE_LOCK_FILE,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+            )
+        except FileExistsError:
+            if clear_stale_flush_state_lock():
+                continue
+            if time.monotonic() >= deadline:
+                logging.warning("Timed out waiting for flush-state lock")
+                yield False
+                return
+            time.sleep(FLUSH_STATE_LOCK_POLL_SECONDS)
+            continue
+        except OSError as e:
+            logging.warning("Failed to acquire flush-state lock: %s", e)
+            yield False
+            return
+
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as lock_handle:
+                lock_handle.write(f"{os.getpid()} {time.time()}\n")
+            yield True
+        finally:
+            try:
+                FLUSH_STATE_LOCK_FILE.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                logging.warning("Failed to release flush-state lock: %s", e)
+        return
+
+
+def record_flush_state(session_id: str, session_timestamp: float) -> None:
+    """Persist the latest flushed session without clobbering cooldown metadata."""
+    with claim_flush_state_lock() as claimed:
+        if not claimed:
+            return
+
+        state = load_flush_state()
+        state["session_id"] = session_id
+        state["timestamp"] = session_timestamp
+        save_flush_state(state)
+
+
+def maybe_trigger_compilation(session_id: str, session_timestamp: float) -> None:
     """Trigger background compilation when pending changes are stale enough."""
     import subprocess as _sp
 
@@ -219,21 +302,42 @@ def maybe_trigger_compilation(flush_state: dict | None = None) -> None:
         if compile_age_seconds < AUTO_COMPILE_STALE_AFTER_SECONDS:
             return
 
-    state = flush_state if flush_state is not None else load_flush_state()
-    try:
-        last_triggered_at = float(state.get(AUTO_COMPILE_TRIGGER_KEY, 0))
-    except (TypeError, ValueError):
-        last_triggered_at = 0.0
-
-    if time.time() - last_triggered_at < AUTO_COMPILE_COOLDOWN_SECONDS:
-        return
-
     compile_script = SCRIPTS_DIR / "compile.py"
     if not compile_script.exists():
         return
 
-    state[AUTO_COMPILE_TRIGGER_KEY] = time.time()
-    save_flush_state(state)
+    cmd = ["uv", "run", "--directory", str(ROOT), "python", str(compile_script)]
+
+    kwargs: dict = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = _sp.CREATE_NEW_PROCESS_GROUP | _sp.DETACHED_PROCESS
+    else:
+        kwargs["start_new_session"] = True
+
+    with claim_flush_state_lock() as claimed:
+        if not claimed:
+            return
+
+        state = load_flush_state()
+        try:
+            last_triggered_at = float(state.get(AUTO_COMPILE_TRIGGER_KEY, 0))
+        except (TypeError, ValueError):
+            last_triggered_at = 0.0
+
+        if time.time() - last_triggered_at < AUTO_COMPILE_COOLDOWN_SECONDS:
+            return
+
+        try:
+            log_handle = open(str(SCRIPTS_DIR / "compile.log"), "a", encoding="utf-8")
+            _sp.Popen(cmd, stdout=log_handle, stderr=_sp.STDOUT, cwd=str(ROOT), **kwargs)
+        except Exception as e:
+            logging.error("Failed to spawn compile.py: %s", e)
+            return
+
+        state["session_id"] = session_id
+        state["timestamp"] = session_timestamp
+        state[AUTO_COMPILE_TRIGGER_KEY] = time.time()
+        save_flush_state(state)
 
     if last_compile_at is None:
         logging.info(
@@ -244,20 +348,6 @@ def maybe_trigger_compilation(flush_state: dict | None = None) -> None:
             "Auto-compilation triggered for stale pending changes; last successful compile was %.1f hours ago",
             (now_utc - last_compile_at).total_seconds() / 3600,
         )
-
-    cmd = ["uv", "run", "--directory", str(ROOT), "python", str(compile_script)]
-
-    kwargs: dict = {}
-    if sys.platform == "win32":
-        kwargs["creationflags"] = _sp.CREATE_NEW_PROCESS_GROUP | _sp.DETACHED_PROCESS
-    else:
-        kwargs["start_new_session"] = True
-
-    try:
-        log_handle = open(str(SCRIPTS_DIR / "compile.log"), "a")
-        _sp.Popen(cmd, stdout=log_handle, stderr=_sp.STDOUT, cwd=str(ROOT), **kwargs)
-    except Exception as e:
-        logging.error("Failed to spawn compile.py: %s", e)
 
 
 def main():
@@ -304,17 +394,15 @@ def main():
         logging.info("Result: saved to daily log (%d chars)", len(response))
         append_to_daily_log(response, "Session")
 
-    # Update dedup state
-    state["session_id"] = session_id
-    state["timestamp"] = time.time()
-    save_flush_state(state)
+    flush_timestamp = time.time()
+    record_flush_state(session_id, flush_timestamp)
 
     # Clean up context file
     context_file.unlink(missing_ok=True)
 
     # Trigger background compilation when today's log changed and the last
     # successful compile is stale enough to warrant a refresh.
-    maybe_trigger_compilation(state)
+    maybe_trigger_compilation(session_id, flush_timestamp)
 
     logging.info("Flush complete for session %s", session_id)
 
