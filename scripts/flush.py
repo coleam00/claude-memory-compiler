@@ -139,40 +139,109 @@ respond with exactly: FLUSH_OK
     return response
 
 
-COMPILE_AFTER_HOUR = 18  # 6 PM local time
+AUTO_COMPILE_STALE_AFTER_SECONDS = 24 * 60 * 60
+AUTO_COMPILE_COOLDOWN_SECONDS = 15 * 60
+AUTO_COMPILE_TRIGGER_KEY = "auto_compile_triggered_at"
 
 
-def maybe_trigger_compilation() -> None:
-    """If it's past the compile hour and today's log hasn't been compiled, run compile.py."""
-    import subprocess as _sp
-
-    now = datetime.now(timezone.utc).astimezone()
-    if now.hour < COMPILE_AFTER_HOUR:
-        return
-
-    # Check if today's log has already been compiled
-    today_log = f"{now.strftime('%Y-%m-%d')}.md"
+def load_compile_state() -> dict:
     compile_state_file = SCRIPTS_DIR / "state.json"
     if compile_state_file.exists():
         try:
-            compile_state = json.loads(compile_state_file.read_text(encoding="utf-8"))
-            ingested = compile_state.get("ingested", {})
-            if today_log in ingested:
-                # Already compiled today - check if the log has changed since
-                from hashlib import sha256
-                log_path = DAILY_DIR / today_log
-                if log_path.exists():
-                    current_hash = sha256(log_path.read_bytes()).hexdigest()[:16]
-                    if ingested[today_log].get("hash") == current_hash:
-                        return  # log unchanged since last compile
+            return json.loads(compile_state_file.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             pass
+    return {}
+
+
+def has_pending_daily_log_changes(now: datetime, compile_state: dict) -> bool:
+    """Return whether today's daily log differs from the last compiled hash."""
+    today_log = f"{now.strftime('%Y-%m-%d')}.md"
+    log_path = DAILY_DIR / today_log
+    if not log_path.exists():
+        return False
+
+    ingested = compile_state.get("ingested", {})
+    if today_log in ingested:
+        from hashlib import sha256
+
+        try:
+            current_hash = sha256(log_path.read_bytes()).hexdigest()[:16]
+        except OSError:
+            return True
+        if ingested[today_log].get("hash") == current_hash:
+            return False
+
+    return True
+
+
+def get_last_successful_compile_at(compile_state: dict) -> datetime | None:
+    """Return the most recent successful compile timestamp from state.json."""
+    latest_compile = None
+
+    for entry in compile_state.get("ingested", {}).values():
+        compiled_at = entry.get("compiled_at")
+        if not compiled_at:
+            continue
+
+        try:
+            compile_time = datetime.fromisoformat(compiled_at)
+        except ValueError:
+            continue
+
+        if compile_time.tzinfo is None:
+            compile_time = compile_time.replace(tzinfo=timezone.utc)
+        else:
+            compile_time = compile_time.astimezone(timezone.utc)
+
+        if latest_compile is None or compile_time > latest_compile:
+            latest_compile = compile_time
+
+    return latest_compile
+
+
+def maybe_trigger_compilation(flush_state: dict | None = None) -> None:
+    """Trigger background compilation when pending changes are stale enough."""
+    import subprocess as _sp
+
+    now_utc = datetime.now(timezone.utc)
+    now = now_utc.astimezone()
+    compile_state = load_compile_state()
+
+    if not has_pending_daily_log_changes(now, compile_state):
+        return
+
+    last_compile_at = get_last_successful_compile_at(compile_state)
+    if last_compile_at is not None:
+        compile_age_seconds = (now_utc - last_compile_at).total_seconds()
+        if compile_age_seconds < AUTO_COMPILE_STALE_AFTER_SECONDS:
+            return
+
+    state = flush_state if flush_state is not None else load_flush_state()
+    try:
+        last_triggered_at = float(state.get(AUTO_COMPILE_TRIGGER_KEY, 0))
+    except (TypeError, ValueError):
+        last_triggered_at = 0.0
+
+    if time.time() - last_triggered_at < AUTO_COMPILE_COOLDOWN_SECONDS:
+        return
 
     compile_script = SCRIPTS_DIR / "compile.py"
     if not compile_script.exists():
         return
 
-    logging.info("End-of-day compilation triggered (after %d:00)", COMPILE_AFTER_HOUR)
+    state[AUTO_COMPILE_TRIGGER_KEY] = time.time()
+    save_flush_state(state)
+
+    if last_compile_at is None:
+        logging.info(
+            "Auto-compilation triggered for pending changes with no prior successful compile"
+        )
+    else:
+        logging.info(
+            "Auto-compilation triggered for stale pending changes; last successful compile was %.1f hours ago",
+            (now_utc - last_compile_at).total_seconds() / 3600,
+        )
 
     cmd = ["uv", "run", "--directory", str(ROOT), "python", str(compile_script)]
 
@@ -239,14 +308,16 @@ def main():
         append_to_daily_log(response, "Session")
 
     # Update dedup state
-    save_flush_state({"session_id": session_id, "timestamp": time.time()})
+    state["session_id"] = session_id
+    state["timestamp"] = time.time()
+    save_flush_state(state)
 
     # Clean up context file
     context_file.unlink(missing_ok=True)
 
-    # End-of-day auto-compilation: if it's past the compile hour and today's
-    # log hasn't been compiled yet, trigger compile.py in the background.
-    maybe_trigger_compilation()
+    # Trigger background compilation when today's log changed and the last
+    # successful compile is stale enough to warrant a refresh.
+    maybe_trigger_compilation(state)
 
     logging.info("Flush complete for session %s", session_id)
 
