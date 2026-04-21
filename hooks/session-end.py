@@ -24,9 +24,12 @@ from pathlib import Path
 if os.environ.get("CLAUDE_INVOKED_BY"):
     sys.exit(0)
 
-ROOT = Path(__file__).resolve().parent.parent
-DAILY_DIR = ROOT / "daily"
-SCRIPTS_DIR = ROOT / "scripts"
+# Import config from scripts/
+_compiler_dir = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_compiler_dir / "scripts"))
+
+from config import COMPILER_DIR, SCRIPTS_DIR
+
 STATE_DIR = SCRIPTS_DIR
 
 logging.basicConfig(
@@ -147,7 +150,7 @@ def main() -> None:
         "uv",
         "run",
         "--directory",
-        str(ROOT),
+        str(COMPILER_DIR),
         "python",
         str(flush_script),
         str(context_file),

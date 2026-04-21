@@ -21,11 +21,11 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-# Paths relative to project root
-ROOT = Path(__file__).resolve().parent.parent
-KNOWLEDGE_DIR = ROOT / "knowledge"
-DAILY_DIR = ROOT / "daily"
-INDEX_FILE = KNOWLEDGE_DIR / "index.md"
+# Import config from scripts/
+_compiler_dir = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_compiler_dir / "scripts"))
+
+from config import DAILY_DIR, INDEX_FILE
 
 MAX_CONTEXT_CHARS = 20_000
 MAX_LOG_LINES = 30
