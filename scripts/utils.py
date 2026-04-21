@@ -6,14 +6,14 @@ import re
 from pathlib import Path
 
 from config import (
-    CONCEPTS_DIR,
-    CONNECTIONS_DIR,
+    ARTICLE_SUBDIRS,
     DAILY_DIR,
     INDEX_FILE,
-    KNOWLEDGE_DIR,
+    INDEXES_DIR,
     LOG_FILE,
-    QA_DIR,
     STATE_FILE,
+    WIKI_DIR,
+    _is_external_vault,
 )
 
 
@@ -57,9 +57,34 @@ def extract_wikilinks(content: str) -> list[str]:
 
 
 def wiki_article_exists(link: str) -> bool:
-    """Check if a wikilinked article exists on disk."""
-    path = KNOWLEDGE_DIR / f"{link}.md"
-    return path.exists()
+    """Check if a wikilinked article exists on disk.
+
+    Handles both bare links ([[slug]]) and path-prefixed links ([[concepts/slug]]).
+    """
+    # Try direct path first (path-prefixed link like concepts/slug)
+    if (WIKI_DIR / f"{link}.md").exists():
+        return True
+    # Search across all content subdirectories (bare link like slug)
+    stem = Path(link).stem if "/" in link else link
+    for subdir in ARTICLE_SUBDIRS:
+        if (subdir / f"{stem}.md").exists():
+            return True
+    return False
+
+
+def find_article_path(link: str) -> Path | None:
+    """Find the actual file path for a wikilink. Returns None if not found."""
+    # Try direct path first
+    direct = WIKI_DIR / f"{link}.md"
+    if direct.exists():
+        return direct
+    # Search subdirectories
+    stem = Path(link).stem if "/" in link else link
+    for subdir in ARTICLE_SUBDIRS:
+        candidate = subdir / f"{stem}.md"
+        if candidate.exists():
+            return candidate
+    return None
 
 
 # ── Wiki content helpers ──────────────────────────────────────────────
@@ -68,18 +93,40 @@ def read_wiki_index() -> str:
     """Read the knowledge base index file."""
     if INDEX_FILE.exists():
         return INDEX_FILE.read_text(encoding="utf-8")
-    return "# Knowledge Base Index\n\n| Article | Summary | Compiled From | Updated |\n|---------|---------|---------------|---------|"
+    if _is_external_vault:
+        return "# Knowledge Base Index\n\n(empty - no articles compiled yet)"
+    return (
+        "# Knowledge Base Index\n\n"
+        "| Article | Summary | Compiled From | Updated |\n"
+        "|---------|---------|---------------|---------|"
+    )
+
+
+def read_domain_indexes() -> str:
+    """Read all domain index files (external vault only)."""
+    if not _is_external_vault or not INDEXES_DIR.exists():
+        return ""
+    parts = []
+    for idx_file in sorted(INDEXES_DIR.glob("*.md")):
+        content = idx_file.read_text(encoding="utf-8")
+        parts.append(f"### Domain Index: {idx_file.stem}\n\n{content}")
+    return "\n\n".join(parts)
 
 
 def read_all_wiki_content() -> str:
     """Read index + all wiki articles into a single string for context."""
     parts = [f"## INDEX\n\n{read_wiki_index()}"]
 
-    for subdir in [CONCEPTS_DIR, CONNECTIONS_DIR, QA_DIR]:
+    # Include domain indexes for external vault
+    domain_idx = read_domain_indexes()
+    if domain_idx:
+        parts.append(f"## DOMAIN INDEXES\n\n{domain_idx}")
+
+    for subdir in ARTICLE_SUBDIRS:
         if not subdir.exists():
             continue
         for md_file in sorted(subdir.glob("*.md")):
-            rel = md_file.relative_to(KNOWLEDGE_DIR)
+            rel = md_file.relative_to(WIKI_DIR)
             content = md_file.read_text(encoding="utf-8")
             parts.append(f"## {rel}\n\n{content}")
 
@@ -89,7 +136,7 @@ def read_all_wiki_content() -> str:
 def list_wiki_articles() -> list[Path]:
     """List all wiki article files."""
     articles = []
-    for subdir in [CONCEPTS_DIR, CONNECTIONS_DIR, QA_DIR]:
+    for subdir in ARTICLE_SUBDIRS:
         if subdir.exists():
             articles.extend(sorted(subdir.glob("*.md")))
     return articles
@@ -105,13 +152,19 @@ def list_raw_files() -> list[Path]:
 # ── Index helpers ─────────────────────────────────────────────────────
 
 def count_inbound_links(target: str, exclude_file: Path | None = None) -> int:
-    """Count how many wiki articles link to a given target."""
+    """Count how many wiki articles link to a given target.
+
+    Handles bare wikilinks: [[slug]] matches target "concepts/slug" or just "slug".
+    """
+    # Extract just the filename stem for matching bare links
+    target_stem = Path(target).stem if "/" in target else target
     count = 0
     for article in list_wiki_articles():
         if article == exclude_file:
             continue
         content = article.read_text(encoding="utf-8")
-        if f"[[{target}]]" in content:
+        # Match both [[full/path]] and [[bare-slug]]
+        if f"[[{target}]]" in content or f"[[{target_stem}]]" in content:
             count += 1
     return count
 
@@ -128,6 +181,6 @@ def get_article_word_count(path: Path) -> int:
 
 
 def build_index_entry(rel_path: str, summary: str, sources: str, updated: str) -> str:
-    """Build a single index table row."""
+    """Build a single index table row (fallback mode only)."""
     link = rel_path.replace(".md", "")
     return f"| [[{link}]] | {summary} | {sources} | {updated} |"
