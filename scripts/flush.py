@@ -23,9 +23,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-DAILY_DIR = ROOT / "daily"
-SCRIPTS_DIR = ROOT / "scripts"
+from config import COMPILER_DIR, DAILY_DIR, SCRIPTS_DIR
+
 STATE_FILE = SCRIPTS_DIR / "last-flush.json"
 LOG_FILE = SCRIPTS_DIR / "flush.log"
 
@@ -120,7 +119,7 @@ respond with exactly: FLUSH_OK
         async for message in query(
             prompt=prompt,
             options=ClaudeAgentOptions(
-                cwd=str(ROOT),
+                cwd=str(COMPILER_DIR),
                 allowed_tools=[],
                 max_turns=2,
             ),
@@ -174,7 +173,7 @@ def maybe_trigger_compilation() -> None:
 
     logging.info("End-of-day compilation triggered (after %d:00)", COMPILE_AFTER_HOUR)
 
-    cmd = ["uv", "run", "--directory", str(ROOT), "python", str(compile_script)]
+    cmd = ["uv", "run", "--directory", str(COMPILER_DIR), "python", str(compile_script)]
 
     kwargs: dict = {}
     if sys.platform == "win32":
@@ -184,7 +183,7 @@ def maybe_trigger_compilation() -> None:
 
     try:
         log_handle = open(str(SCRIPTS_DIR / "compile.log"), "a")
-        _sp.Popen(cmd, stdout=log_handle, stderr=_sp.STDOUT, cwd=str(ROOT), **kwargs)
+        _sp.Popen(cmd, stdout=log_handle, stderr=_sp.STDOUT, cwd=str(COMPILER_DIR), **kwargs)
     except Exception as e:
         logging.error("Failed to spawn compile.py: %s", e)
 
