@@ -89,10 +89,10 @@ Format:
 ```markdown
 # Knowledge Base Index
 
-| Article | Summary | Compiled From | Updated |
-|---------|---------|---------------|---------|
-| [[concepts/supabase-auth]] | Row-level security patterns and JWT gotchas | daily/2026-04-02.md | 2026-04-02 |
-| [[connections/auth-and-webhooks]] | Token verification patterns shared across Supabase auth and Stripe webhooks | daily/2026-04-02.md, daily/2026-04-04.md | 2026-04-04 |
+| Article | Summary | Repo | Compiled From | Updated |
+|---------|---------|------|---------------|---------|
+| [[concepts/supabase-auth]] | Row-level security patterns and JWT gotchas | front-end | daily/front-end/2026-04-02.md | 2026-04-02 |
+| [[connections/auth-and-webhooks]] | Token verification patterns shared across Supabase auth and Stripe webhooks | api-gateway | daily/api-gateway/2026-04-02.md, daily/api-gateway/2026-04-04.md | 2026-04-04 |
 ```
 
 ### `knowledge/log.md` - Build Log
