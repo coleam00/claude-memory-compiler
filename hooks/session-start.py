@@ -17,22 +17,24 @@ Configure in .claude/settings.json:
 """
 
 import json
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-# Paths relative to project root
 ROOT = Path(__file__).resolve().parent.parent
 KNOWLEDGE_DIR = ROOT / "knowledge"
-DAILY_DIR = ROOT / "daily"
 INDEX_FILE = KNOWLEDGE_DIR / "index.md"
 
 MAX_CONTEXT_CHARS = 20_000
 MAX_LOG_LINES = 30
 
+REPO = os.environ.get("MEMORY_REPO", "unknown")
+DAILY_DIR = ROOT / "daily" / REPO
+
 
 def get_recent_log() -> str:
-    """Read the most recent daily log (today or yesterday)."""
+    """Read the most recent daily log (today or yesterday) for this repo."""
     today = datetime.now(timezone.utc).astimezone()
 
     for offset in range(2):
@@ -40,7 +42,6 @@ def get_recent_log() -> str:
         log_path = DAILY_DIR / f"{date.strftime('%Y-%m-%d')}.md"
         if log_path.exists():
             lines = log_path.read_text(encoding="utf-8").splitlines()
-            # Return last N lines to keep context small
             recent = lines[-MAX_LOG_LINES:] if len(lines) > MAX_LOG_LINES else lines
             return "\n".join(recent)
 
@@ -51,9 +52,8 @@ def build_context() -> str:
     """Assemble the context to inject into the conversation."""
     parts = []
 
-    # Today's date
     today = datetime.now(timezone.utc).astimezone()
-    parts.append(f"## Today\n{today.strftime('%A, %B %d, %Y')}")
+    parts.append(f"## Today\n{today.strftime('%A, %B %d, %Y')} | Repo: **{REPO}**")
 
     # Knowledge base index (the core retrieval mechanism)
     if INDEX_FILE.exists():

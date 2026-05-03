@@ -15,7 +15,7 @@ import argparse
 import asyncio
 from pathlib import Path
 
-from config import KNOWLEDGE_DIR, REPORTS_DIR, now_iso, today_iso
+from config import DAILY_DIR, KNOWLEDGE_DIR, REPORTS_DIR, now_iso, today_iso
 from utils import (
     count_inbound_links,
     extract_wikilinks,
@@ -74,12 +74,13 @@ def check_orphan_sources() -> list[dict]:
     ingested = state.get("ingested", {})
     issues = []
     for log_path in list_raw_files():
-        if log_path.name not in ingested:
+        rel = str(log_path.relative_to(DAILY_DIR))
+        if rel not in ingested:
             issues.append({
                 "severity": "warning",
                 "check": "orphan_source",
-                "file": f"daily/{log_path.name}",
-                "detail": f"Uncompiled daily log: {log_path.name} has not been ingested",
+                "file": f"daily/{rel}",
+                "detail": f"Uncompiled daily log: {rel} has not been ingested",
             })
     return issues
 
@@ -90,7 +91,7 @@ def check_stale_articles() -> list[dict]:
     ingested = state.get("ingested", {})
     issues = []
     for log_path in list_raw_files():
-        rel = log_path.name
+        rel = str(log_path.relative_to(DAILY_DIR))
         if rel in ingested:
             stored_hash = ingested[rel].get("hash", "")
             current_hash = file_hash(log_path)

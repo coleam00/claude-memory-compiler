@@ -28,6 +28,8 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = ROOT / "scripts"
 STATE_DIR = SCRIPTS_DIR
 
+REPO = os.environ.get("MEMORY_REPO", "unknown")
+
 logging.basicConfig(
     filename=str(SCRIPTS_DIR / "flush.log"),
     level=logging.INFO,
@@ -150,6 +152,7 @@ def main() -> None:
         str(flush_script),
         str(context_file),
         session_id,
+        REPO,
     ]
 
     creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0

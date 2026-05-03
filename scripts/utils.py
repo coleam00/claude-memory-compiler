@@ -68,7 +68,7 @@ def read_wiki_index() -> str:
     """Read the knowledge base index file."""
     if INDEX_FILE.exists():
         return INDEX_FILE.read_text(encoding="utf-8")
-    return "# Knowledge Base Index\n\n| Article | Summary | Compiled From | Updated |\n|---------|---------|---------------|---------|"
+    return "# Knowledge Base Index\n\n| Article | Summary | Repo | Compiled From | Updated |\n|---------|---------|------|---------------|---------|"
 
 
 def read_all_wiki_content() -> str:
@@ -96,10 +96,10 @@ def list_wiki_articles() -> list[Path]:
 
 
 def list_raw_files() -> list[Path]:
-    """List all daily log files."""
+    """List all daily log files across all repos (daily/{repo}/YYYY-MM-DD.md)."""
     if not DAILY_DIR.exists():
         return []
-    return sorted(DAILY_DIR.glob("*.md"))
+    return sorted(DAILY_DIR.glob("*/*.md"))
 
 
 # ── Index helpers ─────────────────────────────────────────────────────
@@ -127,7 +127,7 @@ def get_article_word_count(path: Path) -> int:
     return len(content.split())
 
 
-def build_index_entry(rel_path: str, summary: str, sources: str, updated: str) -> str:
+def build_index_entry(rel_path: str, summary: str, repo: str, sources: str, updated: str) -> str:
     """Build a single index table row."""
     link = rel_path.replace(".md", "")
-    return f"| [[{link}]] | {summary} | {sources} | {updated} |"
+    return f"| [[{link}]] | {summary} | {repo} | {sources} | {updated} |"

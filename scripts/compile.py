@@ -48,6 +48,7 @@ async def compile_daily_log(log_path: Path, state: dict) -> float:
     log_content = log_path.read_text(encoding="utf-8")
     schema = AGENTS_FILE.read_text(encoding="utf-8")
     wiki_index = read_wiki_index()
+    repo = log_path.parent.name  # daily/{repo}/date.md → repo name
 
     # Read existing articles for context
     existing_articles_context = ""
@@ -102,11 +103,11 @@ Read the daily log above and compile it into wiki articles following the schema 
 4. **Update existing articles** if this log adds new information to concepts already in the wiki
    - Read the existing article, add the new information, add the source to frontmatter
 5. **Update knowledge/index.md** - Add new entries to the table
-   - Each entry: `| [[path/slug]] | One-line summary | source-file | {timestamp[:10]} |`
+   - Each entry: `| [[path/slug]] | One-line summary | {repo} | source-file | {timestamp[:10]} |`
 6. **Append to knowledge/log.md** - Add a timestamped entry:
    ```
    ## [{timestamp}] compile | {log_path.name}
-   - Source: daily/{log_path.name}
+   - Source: daily/{log_path.relative_to(DAILY_DIR)}
    - Articles created: [[concepts/x]], [[concepts/y]]
    - Articles updated: [[concepts/z]] (if any)
    ```
@@ -150,8 +151,8 @@ Read the daily log above and compile it into wiki articles following the schema 
         print(f"  Error: {e}")
         return 0.0
 
-    # Update state
-    rel_path = log_path.name
+    # Update state — key is "{repo}/date.md" so repos don't collide on the same date
+    rel_path = str(log_path.relative_to(DAILY_DIR))
     state.setdefault("ingested", {})[rel_path] = {
         "hash": file_hash(log_path),
         "compiled_at": now_iso(),
@@ -191,7 +192,7 @@ def main():
         else:
             to_compile = []
             for log_path in all_logs:
-                rel = log_path.name
+                rel = str(log_path.relative_to(DAILY_DIR))
                 prev = state.get("ingested", {}).get(rel, {})
                 if not prev or prev.get("hash") != file_hash(log_path):
                     to_compile.append(log_path)
