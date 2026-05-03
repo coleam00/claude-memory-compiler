@@ -6,7 +6,7 @@ pre-extracted conversation context from a .md file, uses the Claude Agent SDK
 to decide what's worth saving, and appends the result to today's daily log.
 
 Usage:
-    uv run python flush.py <context_file.md> <session_id>
+    uv run python flush.py <context_file.md> <session_id> [repo]
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DAILY_DIR = ROOT / "daily"
 SCRIPTS_DIR = ROOT / "scripts"
 STATE_FILE = SCRIPTS_DIR / "last-flush.json"
 LOG_FILE = SCRIPTS_DIR / "flush.log"
@@ -53,13 +52,13 @@ def save_flush_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
 
 
-def append_to_daily_log(content: str, section: str = "Session") -> None:
-    """Append content to today's daily log."""
+def append_to_daily_log(content: str, daily_dir: Path, section: str = "Session") -> None:
+    """Append content to today's daily log for a specific repo."""
     today = datetime.now(timezone.utc).astimezone()
-    log_path = DAILY_DIR / f"{today.strftime('%Y-%m-%d')}.md"
+    log_path = daily_dir / f"{today.strftime('%Y-%m-%d')}.md"
 
     if not log_path.exists():
-        DAILY_DIR.mkdir(parents=True, exist_ok=True)
+        daily_dir.mkdir(parents=True, exist_ok=True)
         log_path.write_text(
             f"# Daily Log: {today.strftime('%Y-%m-%d')}\n\n## Sessions\n\n## Memory Maintenance\n\n",
             encoding="utf-8",
@@ -142,7 +141,7 @@ respond with exactly: FLUSH_OK
 COMPILE_AFTER_HOUR = 18  # 6 PM local time
 
 
-def maybe_trigger_compilation() -> None:
+def maybe_trigger_compilation(daily_dir: Path, repo: str) -> None:
     """If it's past the compile hour and today's log hasn't been compiled, run compile.py."""
     import subprocess as _sp
 
@@ -150,21 +149,20 @@ def maybe_trigger_compilation() -> None:
     if now.hour < COMPILE_AFTER_HOUR:
         return
 
-    # Check if today's log has already been compiled
-    today_log = f"{now.strftime('%Y-%m-%d')}.md"
+    # State key includes repo so each repo tracks its own compilation
+    today_log = f"{repo}/{now.strftime('%Y-%m-%d')}.md"
     compile_state_file = SCRIPTS_DIR / "state.json"
     if compile_state_file.exists():
         try:
             compile_state = json.loads(compile_state_file.read_text(encoding="utf-8"))
             ingested = compile_state.get("ingested", {})
             if today_log in ingested:
-                # Already compiled today - check if the log has changed since
                 from hashlib import sha256
-                log_path = DAILY_DIR / today_log
+                log_path = daily_dir / f"{now.strftime('%Y-%m-%d')}.md"
                 if log_path.exists():
                     current_hash = sha256(log_path.read_bytes()).hexdigest()[:16]
                     if ingested[today_log].get("hash") == current_hash:
-                        return  # log unchanged since last compile
+                        return
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -191,13 +189,15 @@ def maybe_trigger_compilation() -> None:
 
 def main():
     if len(sys.argv) < 3:
-        logging.error("Usage: %s <context_file.md> <session_id>", sys.argv[0])
+        logging.error("Usage: %s <context_file.md> <session_id> [repo]", sys.argv[0])
         sys.exit(1)
 
     context_file = Path(sys.argv[1])
     session_id = sys.argv[2]
+    repo = sys.argv[3] if len(sys.argv) > 3 else "unknown"
+    daily_dir = ROOT / "daily" / repo
 
-    logging.info("flush.py started for session %s, context: %s", session_id, context_file)
+    logging.info("flush.py started for session %s, repo %s, context: %s", session_id, repo, context_file)
 
     if not context_file.exists():
         logging.error("Context file not found: %s", context_file)
@@ -229,14 +229,14 @@ def main():
     if "FLUSH_OK" in response:
         logging.info("Result: FLUSH_OK")
         append_to_daily_log(
-            "FLUSH_OK - Nothing worth saving from this session", "Memory Flush"
+            "FLUSH_OK - Nothing worth saving from this session", daily_dir, "Memory Flush"
         )
     elif "FLUSH_ERROR" in response:
         logging.error("Result: %s", response)
-        append_to_daily_log(response, "Memory Flush")
+        append_to_daily_log(response, daily_dir, "Memory Flush")
     else:
         logging.info("Result: saved to daily log (%d chars)", len(response))
-        append_to_daily_log(response, "Session")
+        append_to_daily_log(response, daily_dir, "Session")
 
     # Update dedup state
     save_flush_state({"session_id": session_id, "timestamp": time.time()})
@@ -244,9 +244,7 @@ def main():
     # Clean up context file
     context_file.unlink(missing_ok=True)
 
-    # End-of-day auto-compilation: if it's past the compile hour and today's
-    # log hasn't been compiled yet, trigger compile.py in the background.
-    maybe_trigger_compilation()
+    maybe_trigger_compilation(daily_dir, repo)
 
     logging.info("Flush complete for session %s", session_id)
 

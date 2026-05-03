@@ -19,15 +19,14 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Recursion guard: if we were spawned by flush.py (which calls Agent SDK,
-# which runs Claude Code, which would fire this hook again), exit immediately.
 if os.environ.get("CLAUDE_INVOKED_BY"):
     sys.exit(0)
 
 ROOT = Path(__file__).resolve().parent.parent
-DAILY_DIR = ROOT / "daily"
 SCRIPTS_DIR = ROOT / "scripts"
 STATE_DIR = SCRIPTS_DIR
+
+REPO = os.environ.get("MEMORY_REPO", "unknown")
 
 logging.basicConfig(
     filename=str(SCRIPTS_DIR / "flush.log"),
@@ -152,6 +151,7 @@ def main() -> None:
         str(flush_script),
         str(context_file),
         session_id,
+        REPO,
     ]
 
     # On Windows, use CREATE_NO_WINDOW to avoid flash console window.

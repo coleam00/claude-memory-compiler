@@ -96,10 +96,10 @@ def list_wiki_articles() -> list[Path]:
 
 
 def list_raw_files() -> list[Path]:
-    """List all daily log files."""
+    """List all daily log files across all repos (daily/{repo}/YYYY-MM-DD.md)."""
     if not DAILY_DIR.exists():
         return []
-    return sorted(DAILY_DIR.glob("*.md"))
+    return sorted(DAILY_DIR.glob("*/*.md"))
 
 
 # ── Index helpers ─────────────────────────────────────────────────────

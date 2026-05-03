@@ -106,7 +106,7 @@ Read the daily log above and compile it into wiki articles following the schema 
 6. **Append to knowledge/log.md** - Add a timestamped entry:
    ```
    ## [{timestamp}] compile | {log_path.name}
-   - Source: daily/{log_path.name}
+   - Source: daily/{log_path.relative_to(DAILY_DIR)}
    - Articles created: [[concepts/x]], [[concepts/y]]
    - Articles updated: [[concepts/z]] (if any)
    ```
@@ -150,8 +150,8 @@ Read the daily log above and compile it into wiki articles following the schema 
         print(f"  Error: {e}")
         return 0.0
 
-    # Update state
-    rel_path = log_path.name
+    # Update state — key is "{repo}/date.md" so repos don't collide on the same date
+    rel_path = str(log_path.relative_to(DAILY_DIR))
     state.setdefault("ingested", {})[rel_path] = {
         "hash": file_hash(log_path),
         "compiled_at": now_iso(),
@@ -191,7 +191,7 @@ def main():
         else:
             to_compile = []
             for log_path in all_logs:
-                rel = log_path.name
+                rel = str(log_path.relative_to(DAILY_DIR))
                 prev = state.get("ingested", {}).get(rel, {})
                 if not prev or prev.get("hash") != file_hash(log_path):
                     to_compile.append(log_path)
