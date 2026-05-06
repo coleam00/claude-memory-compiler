@@ -23,9 +23,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-DAILY_DIR = ROOT / "daily"
-SCRIPTS_DIR = ROOT / "scripts"
+from config import DAILY_DIR, SCRIPTS_DIR, ROOT_DIR as ROOT  # noqa: E402
+
 STATE_FILE = SCRIPTS_DIR / "last-flush.json"
 LOG_FILE = SCRIPTS_DIR / "flush.log"
 
@@ -117,12 +116,23 @@ respond with exactly: FLUSH_OK
     response = ""
 
     try:
+        def _log_stderr(line: str) -> None:
+            logging.error("[bundled CLI stderr] %s", line.rstrip())
+
         async for message in query(
             prompt=prompt,
             options=ClaudeAgentOptions(
                 cwd=str(ROOT),
                 allowed_tools=[],
                 max_turns=2,
+                model="haiku",
+                fallback_model="sonnet",
+                stderr=_log_stderr,
+                extra_args={
+                    "strict-mcp-config": None,
+                    "disable-slash-commands": None,
+                    "setting-sources": "user",
+                },
             ),
         ):
             if isinstance(message, AssistantMessage):
