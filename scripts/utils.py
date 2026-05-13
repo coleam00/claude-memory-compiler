@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import logging
+import os
 import re
 from pathlib import Path
 
@@ -17,18 +19,59 @@ from config import (
 )
 
 
-# ── State management ──────────────────────────────────────────────────
-
-def load_state() -> dict:
-    """Load persistent state from state.json."""
-    if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+def _default_state() -> dict:
+    """Fresh default state. Always returns a NEW dict (with fresh nested
+    containers) so callers can mutate without leaking into later calls."""
     return {"ingested": {}, "query_count": 0, "last_lint": None, "total_cost": 0.0}
 
 
+# ── State management ──────────────────────────────────────────────────
+
+def load_state() -> dict:
+    """Load persistent state from state.json.
+
+    Resilient to empty or truncated files: if the file exists but cannot
+    be parsed as JSON (zero bytes, partial write from a previous crash,
+    etc.), fall back to the default state and log a warning instead of
+    raising. This prevents a single corrupted state file from stalling
+    every subsequent compile run.
+    """
+    if not STATE_FILE.exists():
+        return _default_state()
+    raw = STATE_FILE.read_text(encoding="utf-8")
+    if not raw.strip():
+        logging.warning(
+            "state.json exists but is empty (likely a truncated write); "
+            "starting from default state"
+        )
+        return _default_state()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        logging.warning(
+            "state.json is not valid JSON (%s); starting from default state. "
+            "The bad file has been preserved as state.json.broken for inspection.",
+            exc,
+        )
+        try:
+            STATE_FILE.rename(STATE_FILE.with_suffix(".json.broken"))
+        except OSError:
+            pass
+        return _default_state()
+
+
 def save_state(state: dict) -> None:
-    """Save state to state.json."""
-    STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    """Save state to state.json atomically.
+
+    Writes to a temp file in the same directory and uses os.replace() so
+    a crash mid-write leaves either the previous good file or the new
+    good file, never a truncated/empty one. The previous implementation
+    used Path.write_text which is non-atomic and corrupted state.json on
+    crashes — silently disabling every subsequent compile run.
+    """
+    tmp = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
+    tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    os.replace(tmp, STATE_FILE)
 
 
 # ── File hashing ──────────────────────────────────────────────────────
