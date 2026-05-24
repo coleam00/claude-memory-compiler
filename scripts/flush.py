@@ -21,11 +21,15 @@ import logging
 import sys
 import time
 from datetime import datetime, timezone
+
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DAILY_DIR = ROOT / "daily"
 SCRIPTS_DIR = ROOT / "scripts"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from scripts.receipts import write_memory_receipt
 STATE_FILE = SCRIPTS_DIR / "last-flush.json"
 LOG_FILE = SCRIPTS_DIR / "flush.log"
 
@@ -228,15 +232,30 @@ def main():
     # Append to daily log
     if "FLUSH_OK" in response:
         logging.info("Result: FLUSH_OK")
+        outcome = "empty"
+        daily_section = "Memory Flush"
         append_to_daily_log(
-            "FLUSH_OK - Nothing worth saving from this session", "Memory Flush"
+            "FLUSH_OK - Nothing worth saving from this session", daily_section
         )
     elif "FLUSH_ERROR" in response:
         logging.error("Result: %s", response)
-        append_to_daily_log(response, "Memory Flush")
+        outcome = "error"
+        daily_section = "Memory Flush"
+        append_to_daily_log(response, daily_section)
     else:
         logging.info("Result: saved to daily log (%d chars)", len(response))
-        append_to_daily_log(response, "Session")
+        outcome = "saved"
+        daily_section = "Session"
+        append_to_daily_log(response, daily_section)
+
+    write_memory_receipt(
+        "memory.flush.completed",
+        session_id=session_id,
+        outcome=outcome,
+        daily_section=daily_section,
+        context_chars=len(context),
+        summary_chars=0 if outcome == "empty" else len(response),
+    )
 
     # Update dedup state
     save_flush_state({"session_id": session_id, "timestamp": time.time()})
