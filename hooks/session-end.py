@@ -16,6 +16,7 @@ import os
 import re
 import subprocess
 import sys
+
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,6 +28,9 @@ if os.environ.get("CLAUDE_INVOKED_BY"):
 ROOT = Path(__file__).resolve().parent.parent
 DAILY_DIR = ROOT / "daily"
 SCRIPTS_DIR = ROOT / "scripts"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from scripts.receipts import write_memory_receipt
 STATE_DIR = SCRIPTS_DIR
 
 logging.basicConfig(
@@ -166,6 +170,13 @@ def main() -> None:
             creationflags=creation_flags,
         )
         logging.info("Spawned flush.py for session %s (%d turns, %d chars)", session_id, turn_count, len(context))
+        write_memory_receipt(
+            "memory.flush.requested",
+            session_id=session_id,
+            trigger="SessionEnd",
+            turn_count=turn_count,
+            context_chars=len(context),
+        )
     except Exception as e:
         logging.error("Failed to spawn flush.py: %s", e)
 

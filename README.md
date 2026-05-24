@@ -33,6 +33,24 @@ Conversation -> SessionEnd/PreCompact hooks -> flush.py extracts knowledge
 - **query.py** answers questions using index-guided retrieval (no RAG needed at personal scale)
 - **lint.py** runs 7 health checks (broken links, orphans, contradictions, staleness)
 
+
+## Optional Privacy-Safe Receipts
+
+If you need to prove that the memory pipeline ran without exposing transcript text,
+knowledge-base content, prompts, or local file paths, enable opt-in receipts:
+
+```bash
+export CMC_RECEIPTS=1
+export CMC_RECEIPT_HMAC_KEY="use-a-local-secret-key"
+# optional: export CMC_RECEIPTS_FILE=/path/to/memory-receipts.jsonl
+```
+
+The hooks then append JSONL events such as `memory.flush.requested` and
+`memory.flush.completed`. Receipts include counts, outcomes, and a keyed hash of
+the session id when `CMC_RECEIPT_HMAC_KEY` is present. Without a key, identifiers
+are omitted rather than hashed with guessable SHA-256. Raw transcript context,
+raw memory summaries, prompt text, and transcript paths are never included.
+
 ## Key Commands
 
 ```bash
