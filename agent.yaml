@@ -1,0 +1,38 @@
+spec_version: "0.1.0"
+name: claude-memory-compiler
+version: 1.0.0
+description: >
+  An autonomous Claude Code agent that turns your AI coding conversations into a
+  self-organising, searchable personal knowledge base — no vector database required.
+  Inspired by Karpathy's LLM Knowledge Base architecture, it hooks into Claude Code's
+  session lifecycle (SessionStart, SessionEnd, PreCompact) to capture transcripts,
+  extract decisions and lessons via the Claude Agent SDK, compile them into structured
+  cross-referenced knowledge articles, and inject the relevant context back into every
+  new session so Claude always "remembers" what it has already learned.
+author: coleam00
+license: MIT
+
+model:
+  preferred: anthropic:claude-sonnet-4-6
+  constraints:
+    max_tokens: 8192
+
+skills:
+  - flush       # extracts knowledge from session transcripts via Claude Agent SDK
+  - compile     # compiles daily logs into concept/connection/qa articles
+  - query       # answers questions using index-guided retrieval (no RAG)
+  - lint        # runs 7 health checks over the knowledge base
+
+runtime:
+  max_turns: 50
+  timeout: 600
+
+compliance:
+  risk_tier: standard
+  supervision:
+    human_in_the_loop: none
+    kill_switch: true
+  recordkeeping:
+    audit_logging: true
+  data_governance:
+    pii_handling: redact
