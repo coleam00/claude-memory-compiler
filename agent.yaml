@@ -1,0 +1,50 @@
+spec_version: "0.1.0"
+name: claude-memory-compiler
+version: 1.0.0
+description: >
+  An autonomous knowledge-management agent that automatically captures
+  Claude Code session transcripts via lifecycle hooks, extracts key decisions,
+  lessons, and patterns using the Claude Agent SDK, and compiles them into a
+  structured, cross-referenced personal knowledge base — no RAG, no vector
+  database, just clean Markdown and an index file. Inspired by Karpathy's LLM
+  Knowledge Base architecture.
+
+license: MIT
+
+model:
+  preferred: anthropic:claude-sonnet-4-6
+
+skills:
+  - name: memory-flush
+    description: >
+      Reads a captured conversation transcript and calls the Claude Agent SDK
+      to extract decisions, lessons, and patterns, then appends them to a
+      dated daily log.
+  - name: knowledge-compile
+    description: >
+      Reads daily logs and compiles them into structured, cross-referenced
+      knowledge articles under knowledge/concepts/, knowledge/connections/,
+      and knowledge/qa/.
+  - name: knowledge-query
+    description: >
+      Answers natural-language questions against the knowledge base by first
+      consulting the master index, then reading selected articles.
+  - name: knowledge-lint
+    description: >
+      Runs seven health checks (broken links, orphans, contradictions,
+      staleness, etc.) against the compiled knowledge base.
+
+runtime:
+  max_turns: 50
+  hooks:
+    - event: SessionEnd
+      command: "uv run python hooks/session-end.py"
+    - event: PreCompact
+      command: "uv run python hooks/pre-compact.py"
+    - event: SessionStart
+      command: "uv run python hooks/session-start.py"
+
+compliance:
+  risk_tier: standard
+  supervision:
+    human_in_the_loop: none
