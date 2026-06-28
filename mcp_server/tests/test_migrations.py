@@ -20,3 +20,11 @@ def test_empty_dir(tmp_path):
     assert out["files"] == []
     assert out["latest_number"] is None
     assert out["next_number"] == "000"
+
+
+def test_missing_dir(tmp_path):
+    out = list_migrations(tmp_path / "does_not_exist")
+    assert out["files"] == []
+    assert out["latest_number"] is None
+    assert out["next_number"] == "000"
+    assert "error" in out
