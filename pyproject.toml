@@ -7,7 +7,18 @@ dependencies = [
     "claude-agent-sdk>=0.1.29",
     "python-dotenv>=1.0.0",
     "tzdata>=2024.1",
+    "mcp>=1.2.0",
+    "psycopg[binary]>=3.1",
 ]
+
+[project.scripts]
+starbot-mcp = "mcp_server.server:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
 
 [tool.ruff]
 line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["mcp_server/tests"]
