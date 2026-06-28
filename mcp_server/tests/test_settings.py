@@ -11,10 +11,11 @@ def test_paths_resolve_to_real_locations():
     # Workspace root is the parent of the compiler repo.
     assert settings.WORKSPACE_ROOT == settings.COMPILER_ROOT.parent
     # Migrations live in the sibling StarBot repo.
-    assert settings.MIGRATIONS_DIR.parts[-3:] == ("scripts", "migrations") or \
-        settings.MIGRATIONS_DIR.name == "migrations"
+    assert settings.MIGRATIONS_DIR.parts[-2:] == ("scripts", "migrations")
     assert settings.AGENTS_FILE.name == "AGENTS.md"
     assert settings.MISTAKES_FILE.name == "mistakes.md"
+    assert settings.INDEX_FILE.name == "index.md"
+    assert settings.INDEX_FILE.parent == settings.KNOWLEDGE_DIR
 
 
 def test_get_database_url_raises_when_missing(monkeypatch):

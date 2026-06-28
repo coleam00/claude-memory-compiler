@@ -26,7 +26,7 @@ MISTAKES_FILE = WORKSPACE_ROOT / ".claude" / "mistakes.md"
 AGENTS_FILE = WORKSPACE_ROOT / "AGENTS.md"
 
 # Load the server's own .env (git-ignored) if present.
-load_dotenv(COMPILER_ROOT / "mcp_server" / ".env")
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 # Query safety limits.
 DEFAULT_ROWS = 100
