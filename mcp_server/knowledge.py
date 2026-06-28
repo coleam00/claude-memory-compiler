@@ -51,4 +51,4 @@ def search_knowledge(query: str, limit: int = 5) -> dict:
             scored.append({"path": rel, "title": title, "score": score, "body": body})
 
     scored.sort(key=lambda m: m["score"], reverse=True)
-    return {"index": read_wiki_index(), "matches": scored[: max(1, int(limit))]}
+    return {"index": read_wiki_index(), "matches": scored[: max(0, int(limit))]}
