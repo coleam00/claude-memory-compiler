@@ -11,7 +11,7 @@ truth and searchable project knowledge, to reduce repeated mistakes.
 
 ### 1. Create a dedicated read-only Postgres role (Supabase SQL editor)
 ```sql
-CREATE ROLE mcp_ro WITH LOGIN PASSWORD '<strong-password>';
+CREATE ROLE mcp_ro WITH LOGIN PASSWORD '';
 GRANT USAGE ON SCHEMA public TO mcp_ro;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO mcp_ro;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO mcp_ro;
