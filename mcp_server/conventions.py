@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 from mcp_server import settings
 
 
-def _read(path) -> str:
+def _read(path: Path) -> str:
     if not path.exists():
         return f"(not found: {path})"
     return path.read_text(encoding="utf-8")
@@ -32,8 +35,6 @@ def get_mistakes(topic: str | None = None) -> str:
 
     topic_l = topic.lower()
     # Split into numbered blocks like '\n1) ...' while keeping the header.
-    import re
-
     blocks = re.split(r"(?=^\d+\)\s)", text, flags=re.MULTILINE)
     matched = [b for b in blocks if topic_l in b.lower()]
     if not matched:
