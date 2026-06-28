@@ -18,10 +18,32 @@ _FORBIDDEN = re.compile(
 
 
 def _strip_comments(sql: str) -> str:
-    """Remove block and line comments so they cannot hide a second statement."""
-    sql = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
-    sql = re.sub(r"--[^\n]*", " ", sql)
-    return sql
+    """Remove line and (possibly nested) block comments so they cannot hide a
+    second statement. A scanner is used because regex cannot correctly handle
+    nested /* ... /* ... */ ... */ blocks or comments containing '/' or '*'."""
+    out: list[str] = []
+    i, n, depth = 0, len(sql), 0
+    while i < n:
+        two = sql[i:i + 2]
+        if depth == 0 and two == "--":
+            j = sql.find("\n", i)
+            if j == -1:
+                break
+            out.append("\n")
+            i = j + 1
+        elif two == "/*":
+            depth += 1
+            i += 2
+        elif two == "*/" and depth > 0:
+            depth -= 1
+            out.append(" ")
+            i += 2
+        elif depth > 0:
+            i += 1
+        else:
+            out.append(sql[i])
+            i += 1
+    return "".join(out)
 
 
 def is_safe_select(sql: str) -> tuple[bool, str]:
@@ -43,7 +65,7 @@ def is_safe_select(sql: str) -> tuple[bool, str]:
         return False, "multiple statements are not allowed"
 
     lowered = cleaned.lower()
-    if not (lowered.startswith("select") or lowered.startswith("with")):
+    if not (re.match(r"select\b", lowered) or re.match(r"with\b", lowered)):
         return False, "only SELECT / WITH … SELECT queries are allowed"
 
     match = _FORBIDDEN.search(cleaned)

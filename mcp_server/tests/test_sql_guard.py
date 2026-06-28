@@ -8,6 +8,7 @@ SAFE = [
     "  SELECT * FROM events ORDER BY created_at DESC  ",
     "WITH recent AS (SELECT * FROM events) SELECT * FROM recent",
     "SELECT count(*) FROM tokens;",  # single trailing semicolon allowed
+    "SELECT 1 /* note a/b and 2*3 /* nested */ end */",
 ]
 
 UNSAFE = [
@@ -26,6 +27,7 @@ UNSAFE = [
     ("COPY users TO '/tmp/x'", "copy"),
     ("CALL do_thing()", "call"),
     ("EXPLAIN ANALYZE DELETE FROM users", "not a select"),
+    ("SELECT 1 -- ok\nDELETE FROM users", "delete after line comment"),
 ]
 
 
