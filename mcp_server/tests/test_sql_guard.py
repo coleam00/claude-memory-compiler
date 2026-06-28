@@ -9,6 +9,8 @@ SAFE = [
     "WITH recent AS (SELECT * FROM events) SELECT * FROM recent",
     "SELECT count(*) FROM tokens;",  # single trailing semicolon allowed
     "SELECT 1 /* note a/b and 2*3 /* nested */ end */",
+    "SELECT id FROM users WHERE bio = 'I do create things; delete later'",
+    "SELECT * FROM t WHERE note = 'it''s set'",
 ]
 
 UNSAFE = [
@@ -28,6 +30,7 @@ UNSAFE = [
     ("CALL do_thing()", "call"),
     ("EXPLAIN ANALYZE DELETE FROM users", "not a select"),
     ("SELECT 1 -- ok\nDELETE FROM users", "delete after line comment"),
+    ("SELECT * FROM t WHERE a = 'ok'; DROP TABLE t", "multiple statements"),
 ]
 
 

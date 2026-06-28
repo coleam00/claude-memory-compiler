@@ -51,6 +51,44 @@ def _strip_comments(sql: str) -> str:
     return "".join(out)
 
 
+def _strip_string_literals(sql: str) -> str:
+    """Replace string-literal CONTENTS with empty placeholders so reserved
+    words or semicolons inside literals don't trip the guard. Handles
+    single-quoted strings (with '' escapes) and $tag$ dollar-quoted strings.
+    Used for ANALYSIS only; the original SQL is what actually executes."""
+    out: list[str] = []
+    i, n = 0, len(sql)
+    while i < n:
+        c = sql[i]
+        if c == "'":
+            i += 1
+            while i < n:
+                if sql[i] == "'":
+                    if i + 1 < n and sql[i + 1] == "'":
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            out.append("''")
+        elif c == "$":
+            m = re.match(r"\$([A-Za-z_]\w*)?\$", sql[i:])
+            if m:
+                tag = m.group(0)
+                end = sql.find(tag, i + len(tag))
+                out.append("''")
+                if end == -1:
+                    break
+                i = end + len(tag)
+                continue
+            out.append(c)
+            i += 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
 def is_safe_select(sql: str) -> tuple[bool, str]:
     """Return (True, "") if sql is a single read-only SELECT/WITH query.
 
@@ -61,6 +99,7 @@ def is_safe_select(sql: str) -> tuple[bool, str]:
         return False, "empty query"
 
     cleaned = _strip_comments(sql).strip()
+    cleaned = _strip_string_literals(cleaned)
     # Drop a single optional trailing semicolon; any remaining ';' means
     # multiple statements.
     if cleaned.endswith(";"):
