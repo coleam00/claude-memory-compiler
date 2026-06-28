@@ -87,7 +87,7 @@ def _connect() -> psycopg.Connection:
     return conn
 
 
-def run_select(sql: str, limit: int = 100) -> dict:
+def run_select(sql: str, limit: int = settings.DEFAULT_ROWS) -> dict:
     """Run a guarded, row-capped, read-only SELECT and return rows as dicts."""
     ok, reason = is_safe_select(sql)
     if not ok:
