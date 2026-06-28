@@ -8,6 +8,11 @@ from __future__ import annotations
 
 import re
 
+import psycopg
+from psycopg.rows import dict_row
+
+from mcp_server import settings
+
 # Tokens that must never appear in a read-only query (matched as whole words).
 _FORBIDDEN = re.compile(
     r"\b(insert|update|delete|merge|drop|alter|create|truncate|grant|revoke|"
@@ -73,3 +78,45 @@ def is_safe_select(sql: str) -> tuple[bool, str]:
         return False, f"disallowed keyword '{match.group(0).lower()}' (read-only access only)"
 
     return True, ""
+
+
+def _connect() -> psycopg.Connection:
+    """Open a short-lived read-only connection. Fails fast if no URL is set."""
+    conn = psycopg.connect(settings.get_database_url(), connect_timeout=10)
+    conn.read_only = True
+    return conn
+
+
+def run_select(sql: str, limit: int = 100) -> dict:
+    """Run a guarded, row-capped, read-only SELECT and return rows as dicts."""
+    ok, reason = is_safe_select(sql)
+    if not ok:
+        return {"error": reason}
+
+    cap = max(1, min(int(limit), settings.MAX_ROWS))
+    # Fetch one extra row to detect truncation; wrap so any SELECT/CTE is capped.
+    wrapped = f"SELECT * FROM (\n{sql.rstrip().rstrip(';')}\n) AS _mcp_sub LIMIT {cap + 1}"
+
+    try:
+        with _connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(f"SET LOCAL statement_timeout = {settings.STATEMENT_TIMEOUT_MS}")
+                cur.execute(wrapped)
+                fetched = cur.fetchall()
+                columns = [d.name for d in cur.description] if cur.description else []
+            conn.rollback()
+    except psycopg.errors.QueryCanceled:
+        return {"error": f"query exceeded {settings.STATEMENT_TIMEOUT_MS} ms; add filters"}
+    except psycopg.OperationalError as exc:
+        return {"error": f"cannot connect to read-only DB: {exc.__class__.__name__}"}
+    except psycopg.Error as exc:
+        return {"error": f"query failed: {str(exc).splitlines()[0]}"}
+
+    truncated = len(fetched) > cap
+    rows = fetched[:cap]
+    return {
+        "columns": columns,
+        "rows": rows,
+        "row_count": len(rows),
+        "truncated": truncated,
+    }
