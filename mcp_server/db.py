@@ -120,3 +120,76 @@ def run_select(sql: str, limit: int = settings.DEFAULT_ROWS) -> dict:
         "row_count": len(rows),
         "truncated": truncated,
     }
+
+
+def list_tables(schema: str = "public") -> list[dict]:
+    """List base tables in a schema with estimated row counts."""
+    query = """
+        SELECT c.relname AS table, c.reltuples::bigint AS estimated_rows
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = %s AND c.relkind = 'r'
+        ORDER BY c.relname
+    """
+    try:
+        with _connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(query, (schema,))
+                rows = cur.fetchall()
+            conn.rollback()
+    except psycopg.Error as exc:
+        return [{"error": f"query failed: {str(exc).splitlines()[0]}"}]
+    return rows
+
+
+def get_schema(table: str, schema: str = "public") -> dict:
+    """Return columns, constraints, and indexes for a table (live ground truth)."""
+    cols_q = """
+        SELECT column_name AS column, data_type AS type,
+               (is_nullable = 'YES') AS nullable, column_default AS default,
+               (is_identity = 'YES') AS identity, ordinal_position AS position
+        FROM information_schema.columns
+        WHERE table_schema = %s AND table_name = %s
+        ORDER BY ordinal_position
+    """
+    cons_q = """
+        SELECT conname AS name, pg_get_constraintdef(oid) AS definition
+        FROM pg_constraint
+        WHERE conrelid = %s::regclass
+        ORDER BY conname
+    """
+    idx_q = """
+        SELECT indexname AS name, indexdef AS definition
+        FROM pg_indexes
+        WHERE schemaname = %s AND tablename = %s
+        ORDER BY indexname
+    """
+    qualified = f"{schema}.{table}"
+    try:
+        with _connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(cols_q, (schema, table))
+                columns = cur.fetchall()
+                if not columns:
+                    conn.rollback()
+                    return {"table": table, "schema": schema, "columns": [],
+                            "error": f"table '{qualified}' not found or no columns"}
+                try:
+                    cur.execute(cons_q, (qualified,))
+                    constraints = cur.fetchall()
+                except psycopg.Error:
+                    conn.rollback()
+                    constraints = []
+                cur.execute(idx_q, (schema, table))
+                indexes = cur.fetchall()
+            conn.rollback()
+    except psycopg.Error as exc:
+        return {"error": f"query failed: {str(exc).splitlines()[0]}"}
+
+    return {
+        "table": table,
+        "schema": schema,
+        "columns": columns,
+        "constraints": constraints,
+        "indexes": indexes,
+    }
