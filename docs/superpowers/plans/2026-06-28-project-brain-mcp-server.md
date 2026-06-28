@@ -256,7 +256,7 @@ UNSAFE = [
     ("GRANT SELECT ON users TO bob", "grant"),
     ("SELECT 1; DROP TABLE users", "multiple statements"),
     ("SELECT 1; SELECT 2", "multiple statements"),
-    ("SELECT * FROM users; -- comment", "multiple statements"),
+    ("SELECT 1 /* c */; SELECT 2", "multiple statements"),
     ("WITH x AS (DELETE FROM users RETURNING *) SELECT * FROM x", "delete"),
     ("COPY users TO '/tmp/x'", "copy"),
     ("CALL do_thing()", "call"),
@@ -322,9 +322,10 @@ def is_safe_select(sql: str) -> tuple[bool, str]:
         return False, "empty query"
 
     cleaned = _strip_comments(sql).strip()
-    # Allow exactly one optional trailing semicolon.
-    cleaned = cleaned.rstrip(";").strip() if cleaned.count(";") == 1 and \
-        cleaned.rstrip().endswith(";") else cleaned
+    # Drop a single optional trailing semicolon; any remaining ';' means
+    # multiple statements.
+    if cleaned.endswith(";"):
+        cleaned = cleaned[:-1].strip()
 
     if ";" in cleaned:
         return False, "multiple statements are not allowed"
