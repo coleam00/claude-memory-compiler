@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+import time
 from pathlib import Path
 
 from config import (
@@ -131,3 +132,33 @@ def build_index_entry(rel_path: str, summary: str, sources: str, updated: str) -
     """Build a single index table row."""
     link = rel_path.replace(".md", "")
     return f"| [[{link}]] | {summary} | {sources} | {updated} |"
+
+
+# ── Ephemeral session cleanup ──────────────────────────────────────────
+
+def cleanup_ephemeral_session(cwd: Path, session_id: str | None) -> None:
+    """Delete the throwaway CLI session a claude_agent_sdk.query() call leaves
+    behind. Each flush/compile query() spawns a full `claude` session purely
+    to get a return value for this script; the resulting transcript has no
+    standalone value but otherwise piles up forever in ~/.claude/projects and
+    in Claude Desktop's imported session list. Best-effort: cleanup failing
+    here must never break the actual flush/compile job.
+    """
+    if not session_id:
+        return
+
+    try:
+        sanitized = str(cwd.resolve()).replace("/", "-").replace(".", "-")
+        transcript = Path.home() / ".claude" / "projects" / sanitized / f"{session_id}.jsonl"
+        transcript.unlink(missing_ok=True)
+
+        sessions_root = (
+            Path.home() / "Library" / "Application Support" / "Claude" / "claude-code-sessions"
+        )
+        for local_copy in sessions_root.glob(f"*/*/local_{session_id}.json"):
+            tombstone = local_copy.with_name(f"deleted_{session_id}")
+            local_copy.unlink(missing_ok=True)
+            tombstone.write_text(str(int(time.time() * 1000)))
+            tombstone.chmod(0o600)
+    except Exception:
+        pass
