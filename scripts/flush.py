@@ -23,6 +23,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from utils import cleanup_ephemeral_session
+
 ROOT = Path(__file__).resolve().parent.parent
 DAILY_DIR = ROOT / "daily"
 SCRIPTS_DIR = ROOT / "scripts"
@@ -72,8 +74,12 @@ def append_to_daily_log(content: str, section: str = "Session") -> None:
         f.write(entry)
 
 
-async def run_flush(context: str) -> str:
-    """Use Claude Agent SDK to extract important knowledge from conversation context."""
+async def run_flush(context: str) -> tuple[str, str | None]:
+    """Use Claude Agent SDK to extract important knowledge from conversation context.
+
+    Returns (response_text, ephemeral_session_id) — the session id is the
+    query()'s own throwaway CLI session, cleaned up by the caller.
+    """
     from claude_agent_sdk import (
         AssistantMessage,
         ClaudeAgentOptions,
@@ -115,6 +121,7 @@ respond with exactly: FLUSH_OK
 {context}"""
 
     response = ""
+    ephemeral_session_id: str | None = None
 
     try:
         async for message in query(
@@ -130,13 +137,13 @@ respond with exactly: FLUSH_OK
                     if isinstance(block, TextBlock):
                         response += block.text
             elif isinstance(message, ResultMessage):
-                pass
+                ephemeral_session_id = message.session_id
     except Exception as e:
         import traceback
         logging.error("Agent SDK error: %s\n%s", e, traceback.format_exc())
         response = f"FLUSH_ERROR: {type(e).__name__}: {e}"
 
-    return response
+    return response, ephemeral_session_id
 
 
 COMPILE_AFTER_HOUR = 18  # 6 PM local time
@@ -223,7 +230,8 @@ def main():
     logging.info("Flushing session %s: %d chars", session_id, len(context))
 
     # Run the LLM extraction
-    response = asyncio.run(run_flush(context))
+    response, ephemeral_session_id = asyncio.run(run_flush(context))
+    cleanup_ephemeral_session(ROOT, ephemeral_session_id)
 
     # Append to daily log
     if "FLUSH_OK" in response:

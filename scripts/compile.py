@@ -20,6 +20,7 @@ from pathlib import Path
 
 from config import AGENTS_FILE, CONCEPTS_DIR, CONNECTIONS_DIR, DAILY_DIR, KNOWLEDGE_DIR, now_iso
 from utils import (
+    cleanup_ephemeral_session,
     file_hash,
     list_raw_files,
     list_wiki_articles,
@@ -145,6 +146,7 @@ Read the daily log above and compile it into wiki articles following the schema 
                         pass  # compilation output - LLM writes files directly
             elif isinstance(message, ResultMessage):
                 cost = message.total_cost_usd or 0.0
+                cleanup_ephemeral_session(ROOT_DIR, message.session_id)
                 print(f"  Cost: ${cost:.4f}")
     except Exception as e:
         print(f"  Error: {e}")
