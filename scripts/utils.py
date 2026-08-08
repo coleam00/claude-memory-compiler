@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+import shutil
 import time
 from pathlib import Path
 
@@ -137,20 +138,37 @@ def build_index_entry(rel_path: str, summary: str, sources: str, updated: str) -
 # ── Ephemeral session cleanup ──────────────────────────────────────────
 
 def cleanup_ephemeral_session(cwd: Path, session_id: str | None) -> None:
-    """Delete the throwaway CLI session a claude_agent_sdk.query() call leaves
-    behind. Each flush/compile query() spawns a full `claude` session purely
-    to get a return value for this script; the resulting transcript has no
-    standalone value but otherwise piles up forever in ~/.claude/projects and
-    in Claude Desktop's imported session list. Best-effort: cleanup failing
-    here must never break the actual flush/compile job.
+    """Delete everything a claude_agent_sdk.query() call leaves behind. Each
+    flush/compile query() spawns a full `claude` session purely to get a
+    return value for this script; the resulting artifacts have no standalone
+    value but otherwise pile up forever: the transcript itself, its companion
+    directory (subagents/, tool-results/), a PreCompact checkpoint if the
+    query auto-compacted, and (once Desktop imports it) a `local_<uuid>.json`
+    copy in Desktop's session store. Best-effort: cleanup failing here must
+    never break the actual flush/compile job.
     """
     if not session_id:
         return
 
     try:
-        sanitized = str(cwd.resolve()).replace("/", "-").replace(".", "-")
-        transcript = Path.home() / ".claude" / "projects" / sanitized / f"{session_id}.jsonl"
-        transcript.unlink(missing_ok=True)
+        proj_dir = Path.home() / ".claude" / "projects" / (
+            str(cwd.resolve()).replace("/", "-").replace(".", "-")
+        )
+
+        (proj_dir / f"{session_id}.jsonl").unlink(missing_ok=True)
+
+        companion_dir = proj_dir / session_id
+        if companion_dir.is_dir():
+            shutil.rmtree(companion_dir, ignore_errors=True)
+
+        checkpoints_dir = proj_dir / "checkpoints"
+        if checkpoints_dir.is_dir():
+            for ckpt in checkpoints_dir.glob("*.json"):
+                try:
+                    if json.loads(ckpt.read_text()).get("session_id") == session_id:
+                        ckpt.unlink()
+                except Exception:
+                    continue
 
         sessions_root = (
             Path.home() / "Library" / "Application Support" / "Claude" / "claude-code-sessions"
