@@ -48,11 +48,15 @@ async def run_query(question: str, file_back: bool = False) -> str:
 After answering, do the following:
 1. Create a Q&A article at {QA_DIR}/ with the filename being a slugified version
    of the question (e.g., knowledge/qa/how-to-handle-auth-redirects.md)
-2. Use the Q&A article format from the schema (frontmatter with title, question,
-   consulted articles, filed date)
-3. Update {KNOWLEDGE_DIR / 'index.md'} with a new row for this Q&A article
-4. Append to {KNOWLEDGE_DIR / 'log.md'}:
-   ## [{timestamp}] query (filed) | question summary
+2. Use the Q&A article format from the schema (frontmatter with `type: qa`, title,
+   question, consulted articles, filed date)
+3. Update {KNOWLEDGE_DIR / 'index.md'} with a new row for this Q&A article, using a
+   standard markdown link like [Title](qa/article-name.md), not a [[wikilink]]
+4. Append to {KNOWLEDGE_DIR / 'log.md'} under a plain ISO date heading (never a
+   bracketed heading):
+   ## {timestamp[:10]}
+
+   - {timestamp} query (filed) | question summary
    - Question: {question}
    - Consulted: [[list of articles read]]
    - Filed to: [[qa/article-name]]

@@ -91,8 +91,12 @@ Format:
 
 | Article | Summary | Compiled From | Updated |
 |---------|---------|---------------|---------|
-| [[concepts/supabase-auth]] | Row-level security patterns and JWT gotchas | daily/2026-04-02.md | 2026-04-02 |
-| [[connections/auth-and-webhooks]] | Token verification patterns shared across Supabase auth and Stripe webhooks | daily/2026-04-02.md, daily/2026-04-04.md | 2026-04-04 |
+| [Supabase Auth](concepts/supabase-auth.md) | Row-level security patterns and JWT gotchas | daily/2026-04-02.md | 2026-04-02 |
+| [Auth and Webhooks](connections/auth-and-webhooks.md) | Token verification patterns shared across Supabase auth and Stripe webhooks | daily/2026-04-02.md, daily/2026-04-04.md | 2026-04-04 |
+
+Index entries use standard markdown links, not `[[wikilinks]]`, so any OKF-aware
+consumer (not just Obsidian) can traverse the bundle. Wikilinks remain the linking
+style inside article bodies.
 ```
 
 ### `knowledge/log.md` - Build Log
@@ -104,14 +108,22 @@ Format:
 ```markdown
 # Build Log
 
-## [2026-04-01T14:30:00] compile | Daily Log 2026-04-01
+## 2026-04-01
+
+- 2026-04-01T14:30:00 compile | Daily Log 2026-04-01
 - Source: daily/2026-04-01.md
 - Articles created: [[concepts/nextjs-project-structure]], [[concepts/tailwind-setup]]
 - Articles updated: (none)
 
-## [2026-04-02T09:00:00] query | "How do I handle auth redirects?"
+## 2026-04-02
+
+- 2026-04-02T09:00:00 query | "How do I handle auth redirects?"
 - Consulted: [[concepts/supabase-auth]], [[concepts/nextjs-middleware]]
 - Filed to: [[qa/auth-redirect-handling]]
+
+Headings are plain ISO dates (`## YYYY-MM-DD`), repeated when a day has multiple
+operations, with the full timestamp on the entry's first line. Bracketed headings
+like `## [2026-04-01T14:30:00]` are not OKF-conformant.
 ```
 
 ---
@@ -124,6 +136,7 @@ One article per atomic piece of knowledge. These are facts, patterns, decisions,
 
 ```markdown
 ---
+type: concept
 title: "Concept Name"
 aliases: [alternate-name, abbreviation]
 tags: [domain, topic]
@@ -162,6 +175,7 @@ Cross-cutting synthesis linking 2+ concepts. Created when a conversation reveals
 
 ```markdown
 ---
+type: connection
 title: "Connection: X and Y"
 connects:
   - "concepts/concept-x"
@@ -198,6 +212,7 @@ Filed answers from queries. Every complex question answered by the system can be
 
 ```markdown
 ---
+type: qa
 title: "Q: Original Question"
 question: "The exact question asked"
 consulted:

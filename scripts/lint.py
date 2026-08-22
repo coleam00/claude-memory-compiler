@@ -1,8 +1,9 @@
 """
 Lint the knowledge base for structural and semantic health.
 
-Runs 7 checks: broken links, orphan pages, orphan sources, stale articles,
-contradictions (LLM), missing backlinks, and sparse articles.
+Runs 8 checks: broken links, orphan pages, orphan sources, stale articles,
+contradictions (LLM), missing backlinks, sparse articles, and missing type
+frontmatter (OKF conformance).
 
 Usage:
     uv run python lint.py                    # all checks
@@ -126,6 +127,32 @@ def check_missing_backlinks() -> list[dict]:
                         "detail": f"[[{source_link}]] links to [[{link}]] but not vice versa",
                         "auto_fixable": True,
                     })
+    return issues
+
+
+def check_missing_type() -> list[dict]:
+    """Check for articles without a non-empty `type` frontmatter field.
+
+    OKF (Google's Open Knowledge Format) requires exactly one frontmatter
+    field on every concept document: `type`. An article missing it makes the
+    bundle nonconformant for any OKF-aware consumer.
+    """
+    import re
+
+    fm_re = re.compile(r"^---\n(.*?)\n---\n", re.S)
+    type_re = re.compile(r"^type:\s*\S+", re.M)
+    issues = []
+    for article in list_wiki_articles():
+        content = article.read_text(encoding="utf-8")
+        rel = article.relative_to(KNOWLEDGE_DIR)
+        match = fm_re.match(content)
+        if not match or not type_re.search(match.group(1)):
+            issues.append({
+                "severity": "error",
+                "check": "missing_type",
+                "file": str(rel),
+                "detail": "Missing non-empty `type` frontmatter field (required by OKF)",
+            })
     return issues
 
 
@@ -267,6 +294,7 @@ def main():
         ("Stale articles", check_stale_articles),
         ("Missing backlinks", check_missing_backlinks),
         ("Sparse articles", check_sparse_articles),
+        ("Missing type frontmatter", check_missing_type),
     ]
 
     for name, check_fn in checks:

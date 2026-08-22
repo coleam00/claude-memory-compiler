@@ -94,6 +94,7 @@ Read the daily log above and compile it into wiki articles following the schema 
 1. **Extract key concepts** - Identify 3-7 distinct concepts worth their own article
 2. **Create concept articles** in `knowledge/concepts/` - One .md file per concept
    - Use the exact article format from AGENTS.md (YAML frontmatter + sections)
+   - Include `type:` in frontmatter (`concept` or `connection`) - required for OKF conformance
    - Include `sources:` in frontmatter pointing to the daily log file
    - Use `[[concepts/slug]]` wikilinks to link to related concepts
    - Write in encyclopedia style - neutral, comprehensive
@@ -102,14 +103,20 @@ Read the daily log above and compile it into wiki articles following the schema 
 4. **Update existing articles** if this log adds new information to concepts already in the wiki
    - Read the existing article, add the new information, add the source to frontmatter
 5. **Update knowledge/index.md** - Add new entries to the table
-   - Each entry: `| [[path/slug]] | One-line summary | source-file | {timestamp[:10]} |`
-6. **Append to knowledge/log.md** - Add a timestamped entry:
+   - Each entry: `| [Title](path/slug.md) | One-line summary | source-file | {timestamp[:10]} |`
+   - Index entries use standard markdown links, not [[wikilinks]], so non-Obsidian
+     consumers can traverse the bundle (wikilinks stay fine inside article bodies)
+6. **Append to knowledge/log.md** - Add an entry under a plain ISO date heading:
    ```
-   ## [{timestamp}] compile | {log_path.name}
+   ## {timestamp[:10]}
+
+   - {timestamp} compile | {log_path.name}
    - Source: daily/{log_path.name}
    - Articles created: [[concepts/x]], [[concepts/y]]
    - Articles updated: [[concepts/z]] (if any)
    ```
+   Repeating a date heading for a second run on the same day is fine. Never use
+   bracketed headings like `## [{timestamp}]`.
 
 ### File paths:
 - Write concept articles to: {CONCEPTS_DIR}
