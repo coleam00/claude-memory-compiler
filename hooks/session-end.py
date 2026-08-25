@@ -16,7 +16,7 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Recursion guard: if we were spawned by flush.py (which calls Agent SDK,
@@ -25,7 +25,6 @@ if os.environ.get("CLAUDE_INVOKED_BY"):
     sys.exit(0)
 
 ROOT = Path(__file__).resolve().parent.parent
-DAILY_DIR = ROOT / "daily"
 SCRIPTS_DIR = ROOT / "scripts"
 STATE_DIR = SCRIPTS_DIR
 
@@ -107,6 +106,7 @@ def main() -> None:
 
     session_id = hook_input.get("session_id", "unknown")
     source = hook_input.get("source", "unknown")
+    source_cwd = hook_input.get("cwd") or None
     transcript_path_str = hook_input.get("transcript_path", "")
 
     logging.info("SessionEnd fired: session=%s source=%s", session_id, source)
@@ -136,7 +136,7 @@ def main() -> None:
         return
 
     # Write context to a temp file for the background process
-    timestamp = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d-%H%M%S")
+    timestamp = datetime.now(UTC).astimezone().strftime("%Y%m%d-%H%M%S")
     context_file = STATE_DIR / f"session-flush-{session_id}-{timestamp}.md"
     context_file.write_text(context, encoding="utf-8")
 
@@ -153,16 +153,26 @@ def main() -> None:
         str(context_file),
         session_id,
     ]
+    if source_cwd:
+        cmd += ["--source-cwd", str(source_cwd)]
 
     # On Windows, use CREATE_NO_WINDOW to avoid flash console window.
     # Do NOT use DETACHED_PROCESS — it breaks the Agent SDK's subprocess I/O.
     creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
+    # Capture the child's stderr so bundled-CLI errors (swallowed by the Agent
+    # SDK wrapper as "Check stderr output for details") land somewhere inspectable.
+    stderr_log = SCRIPTS_DIR / "flush-stderr.log"
     try:
+        stderr_handle = open(stderr_log, "a", encoding="utf-8")
+        stderr_handle.write(
+            f"\n--- {datetime.now(UTC).astimezone().isoformat()} session={session_id} ---\n"
+        )
+        stderr_handle.flush()
         subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=stderr_handle,
             creationflags=creation_flags,
         )
         logging.info("Spawned flush.py for session %s (%d turns, %d chars)", session_id, turn_count, len(context))

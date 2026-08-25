@@ -17,7 +17,7 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Recursion guard
@@ -104,6 +104,7 @@ def main() -> None:
         return
 
     session_id = hook_input.get("session_id", "unknown")
+    source_cwd = hook_input.get("cwd") or None
     transcript_path_str = hook_input.get("transcript_path", "")
 
     logging.info("PreCompact fired: session=%s", session_id)
@@ -134,7 +135,7 @@ def main() -> None:
         return
 
     # Write context to a temp file for the background process
-    timestamp = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d-%H%M%S")
+    timestamp = datetime.now(UTC).astimezone().strftime("%Y%m%d-%H%M%S")
     context_file = STATE_DIR / f"flush-context-{session_id}-{timestamp}.md"
     context_file.write_text(context, encoding="utf-8")
 
@@ -151,14 +152,22 @@ def main() -> None:
         str(context_file),
         session_id,
     ]
+    if source_cwd:
+        cmd += ["--source-cwd", str(source_cwd)]
 
     creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
+    stderr_log = SCRIPTS_DIR / "flush-stderr.log"
     try:
+        stderr_handle = open(stderr_log, "a", encoding="utf-8")
+        stderr_handle.write(
+            f"\n--- {datetime.now(UTC).astimezone().isoformat()} session={session_id} (pre-compact) ---\n"
+        )
+        stderr_handle.flush()
         subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=stderr_handle,
             creationflags=creation_flags,
         )
         logging.info("Spawned flush.py for session %s (%d turns, %d chars)", session_id, turn_count, len(context))
