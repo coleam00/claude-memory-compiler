@@ -1,0 +1,268 @@
+filters:
+  and:
+    - file.ext == "md"
+    - or:
+        - file.inFolder("raw")
+        - file.inFolder("claude-memory-compiler/knowledge/concepts")
+        - file.inFolder("claude-memory-compiler/knowledge/connections")
+        - file.inFolder("claude-memory-compiler/knowledge/qa")
+        - file.inFolder("claude-memory-compiler/records/captures")
+        - file.inFolder("claude-memory-compiler/records/runs")
+formulas:
+  knowledge_kind: 'if(file.inFolder("claude-memory-compiler/knowledge/concepts"), "concept", if(file.inFolder("claude-memory-compiler/knowledge/connections"), "connection", if(file.inFolder("claude-memory-compiler/knowledge/qa"), "qa", "")))'
+  source_count: if(sources, sources.length, 0)
+properties:
+  title:
+    displayName: Title
+  summary:
+    displayName: Summary
+  connects:
+    displayName: Connects
+  sources:
+    displayName: Sources
+  created:
+    displayName: Source Date
+  updated:
+    displayName: Updated
+  formula.knowledge_kind:
+    displayName: Kind
+  formula.source_count:
+    displayName: Sources
+  source:
+    displayName: Source
+  author:
+    displayName: Author
+  published:
+    displayName: Published
+  description:
+    displayName: Description
+  record_day:
+    displayName: Record Day
+  capture_kind:
+    displayName: Capture Kind
+  capture_status:
+    displayName: Capture Status
+  source_timestamp:
+    displayName: Source Timestamp
+  source_sid:
+    displayName: Source Session
+  source_file:
+    displayName: Source File
+  source_aggregate_file:
+    displayName: Legacy Aggregate
+  source_ordinal:
+    displayName: Source Ordinal
+  source_line_start:
+    displayName: Legacy Start Line
+  source_line_end:
+    displayName: Legacy End Line
+  source_project:
+    displayName: Source Project
+  record_origin:
+    displayName: Record Origin
+  payload_sha256:
+    displayName: Payload Hash
+  record_id:
+    displayName: Record ID
+  operation:
+    displayName: Operation
+  started_at:
+    displayName: Started At
+  source_day:
+    displayName: Source Day
+  run_qualifier:
+    displayName: Run Qualifier
+  change_kind:
+    displayName: Change Kind
+  articles_created:
+    displayName: Articles Created
+  articles_updated:
+    displayName: Articles Updated
+views:
+  - type: table
+    name: Knowledge Catalog
+    filters:
+      or:
+        - file.inFolder("claude-memory-compiler/knowledge/concepts")
+        - file.inFolder("claude-memory-compiler/knowledge/connections")
+        - file.inFolder("claude-memory-compiler/knowledge/qa")
+    groupBy:
+      property: created
+      direction: DESC
+    order:
+      - title
+      - summary
+      - created
+      - file.links
+      - tags
+    sort:
+      - property: tags
+        direction: ASC
+    columnSize:
+      note.title: 237
+      note.summary: 371
+      note.created: 132
+  - type: table
+    name: Connections
+    filters:
+      and:
+        - file.inFolder("claude-memory-compiler/knowledge/connections")
+        - formula.knowledge_kind == "connection"
+    groupBy:
+      property: created
+      direction: DESC
+    order:
+      - file.link
+      - connects
+      - formula.source_count
+      - created
+      - updated
+  - type: table
+    name: Raw Inputs
+    filters: file.inFolder("raw")
+    groupBy:
+      property: created
+      direction: DESC
+    order:
+      - file.link
+      - title
+      - source
+      - author
+      - published
+      - created
+      - description
+      - tags
+      - file.links
+      - file.path
+      - icon
+      - category
+      - aliases
+      - formula.source_count
+      - file.tags
+      - file.size
+      - file.name
+      - file.mtime
+      - file.fullname
+      - file.folder
+      - file.ext
+      - file.embeds
+      - file.ctime
+      - file.basename
+      - file.backlinks
+  - type: table
+    name: Web Clippings
+    filters:
+      and:
+        - file.inFolder("raw")
+        - source
+        - title
+        - created
+        - file.hasTag("clippings")
+    order:
+      - file.link
+      - title
+      - source
+      - author
+      - published
+      - created
+      - description
+      - tags
+  - type: table
+    name: Other Raw
+    filters:
+      and:
+        - file.inFolder("raw")
+        - not:
+            - and:
+                - source
+                - title
+                - created
+                - file.hasTag("clippings")
+    order:
+      - file.link
+      - title
+      - source
+      - author
+      - published
+      - created
+      - description
+      - tags
+  - type: table
+    name: Capture Narratives
+    filters:
+      and:
+        - file.inFolder("claude-memory-compiler/records/captures")
+        - record_type == "capture_record"
+        - capture_status == "narrative"
+    groupBy:
+      property: record_day
+      direction: DESC
+    order:
+      - file.link
+      - record_day
+      - capture_kind
+      - source_timestamp
+      - source_sid
+      - source_project
+      - record_origin
+      - source_file
+      - source_ordinal
+  - type: table
+    name: Capture Failures
+    filters:
+      and:
+        - file.inFolder("claude-memory-compiler/records/captures")
+        - record_type == "capture_record"
+        - capture_status == "failure"
+    groupBy:
+      property: record_day
+      direction: DESC
+    order:
+      - file.link
+      - record_day
+      - capture_kind
+      - source_timestamp
+      - source_sid
+      - source_project
+      - record_origin
+      - source_file
+      - source_ordinal
+  - type: table
+    name: Capture No-ops
+    filters:
+      and:
+        - file.inFolder("claude-memory-compiler/records/captures")
+        - record_type == "capture_record"
+        - capture_status == "no_op"
+    groupBy:
+      property: record_day
+      direction: DESC
+    order:
+      - file.link
+      - record_day
+      - capture_kind
+      - source_timestamp
+      - source_sid
+      - source_project
+      - record_origin
+      - source_file
+      - source_ordinal
+  - type: table
+    name: Compilation Runs
+    filters:
+      and:
+        - file.inFolder("claude-memory-compiler/records/runs")
+        - record_type == "compilation_run"
+    groupBy:
+      property: source_day
+      direction: DESC
+    order:
+      - file.link
+      - operation
+      - started_at
+      - source_day
+      - run_qualifier
+      - change_kind
+      - articles_created
+      - articles_updated
+      - source_file
