@@ -1,8 +1,11 @@
 """
 Lint the knowledge base for structural and semantic health.
 
-Runs 7 checks: broken links, orphan pages, orphan sources, stale articles,
-contradictions (LLM), missing backlinks, and sparse articles.
+Runs 8 checks: broken links, orphan pages, orphan sources, stale articles,
+contradictions (LLM), missing backlinks, sparse articles, and index table
+corruption. Orphan-source and staleness checks are keyed on Capture Records
+(records/captures/) and the `compiled_captures` payload hashes in state.json;
+historical daily/ aggregates are read-only legacy inputs and never checked.
 
 Usage:
     uv run python lint.py                    # all checks
@@ -14,19 +17,22 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
 from pathlib import Path
 
-from config import KNOWLEDGE_DIR, REPORTS_DIR, now_iso, today_iso
+from capture_records import capture_state_key, list_capture_records
+from config import INDEX_FILE, KNOWLEDGE_DIR, REPORTS_DIR, now_iso, today_iso
 from utils import (
+    INDEX_COLUMNS,
+    ZERO_WIDTH_SPACE,
     count_inbound_links,
     extract_wikilinks,
-    file_hash,
     get_article_word_count,
-    list_raw_files,
     list_wiki_articles,
     load_state,
     read_all_wiki_content,
     save_state,
+    split_table_row,
     wiki_article_exists,
 )
 
@@ -70,38 +76,43 @@ def check_orphan_pages() -> list[dict]:
 
 
 def check_orphan_sources() -> list[dict]:
-    """Check for daily logs that haven't been compiled yet."""
+    """Check for Capture Records that haven't been compiled yet."""
     state = load_state()
-    ingested = state.get("ingested", {})
+    compiled = state.get("compiled_captures", {})
     issues = []
-    for log_path in list_raw_files():
-        if log_path.name not in ingested:
+    for record in list_capture_records():
+        if record.capture_status != "narrative":
+            continue
+        if capture_state_key(record) not in compiled:
+            rel = record.path.relative_to(ROOT_DIR)
             issues.append({
                 "severity": "warning",
                 "check": "orphan_source",
-                "file": f"daily/{log_path.name}",
-                "detail": f"Uncompiled daily log: {log_path.name} has not been ingested",
+                "file": str(rel),
+                "detail": f"Uncompiled Capture Record: {rel} has not been compiled",
             })
     return issues
 
 
 def check_stale_articles() -> list[dict]:
-    """Check if source daily logs have changed since compilation."""
+    """Check if Capture Record payloads changed since compilation."""
     state = load_state()
-    ingested = state.get("ingested", {})
+    compiled = state.get("compiled_captures", {})
     issues = []
-    for log_path in list_raw_files():
-        rel = log_path.name
-        if rel in ingested:
-            stored_hash = ingested[rel].get("hash", "")
-            current_hash = file_hash(log_path)
-            if stored_hash != current_hash:
-                issues.append({
-                    "severity": "warning",
-                    "check": "stale_article",
-                    "file": f"daily/{rel}",
-                    "detail": f"Stale: {rel} has changed since last compilation",
-                })
+    for record in list_capture_records():
+        if record.capture_status != "narrative":
+            continue
+        entry = compiled.get(capture_state_key(record))
+        if entry is None:
+            continue  # uncompiled records are orphan_source's job, not staleness
+        if entry.get("payload_sha256") != record.payload_sha256:
+            rel = record.path.relative_to(ROOT_DIR)
+            issues.append({
+                "severity": "warning",
+                "check": "stale_article",
+                "file": str(rel),
+                "detail": f"Stale: {rel} has changed since last compilation",
+            })
     return issues
 
 
@@ -146,12 +157,94 @@ def check_sparse_articles() -> list[dict]:
     return issues
 
 
+def check_index_table() -> list[dict]:
+    """Check knowledge/index.md for corrupted table rows.
+
+    Flags rows split by an unescaped alias pipe inside a `[[wikilink]]`,
+    rows that don't have exactly 4 columns, a header/separator that
+    isn't the canonical 4-column form, and inline code spans starting
+    with `=` (which Dataview parses as an inline-field expression and
+    renders as a parsing-error block).
+    """
+    issues = []
+    if not INDEX_FILE.exists():
+        return issues
+
+    canonical_header = "| " + " | ".join(INDEX_COLUMNS) + " |"
+    canonical_separator = "| " + " | ".join("---" for _ in INDEX_COLUMNS) + " |"
+
+    lines = INDEX_FILE.read_text(encoding="utf-8").splitlines()
+    table_lines = [(n, l) for n, l in enumerate(lines, 1) if l.lstrip().startswith("|")]
+
+    for row_index, (lineno, line) in enumerate(table_lines):
+        is_separator = row_index == 1 and set(line.strip()) <= set("-:| ")
+
+        if row_index == 0 or is_separator:
+            expected = canonical_separator if is_separator else canonical_header
+            if line.strip() != expected:
+                issues.append({
+                    "severity": "warning",
+                    "check": "index_table",
+                    "file": "index.md",
+                    "detail": (
+                        f"Line {lineno}: table header/separator is not the canonical "
+                        f"4-column form - run normalize_index_file()"
+                    ),
+                    "auto_fixable": True,
+                })
+            continue
+
+        cell_count = len(split_table_row(line))
+        if cell_count != 4:
+            issues.append({
+                "severity": "warning",
+                "check": "index_table",
+                "file": "index.md",
+                "detail": (
+                    f"Line {lineno}: row has {cell_count} cells, expected 4 "
+                    f"(likely an unescaped `|` split a wikilink alias) - "
+                    f"run normalize_index_file()"
+                ),
+                "auto_fixable": True,
+            })
+
+        for wikilink in re.findall(r"\[\[([^\]]+)\]\]", line):
+            if re.search(r"(?<!\\)\|", wikilink):
+                issues.append({
+                    "severity": "warning",
+                    "check": "index_table",
+                    "file": "index.md",
+                    "detail": (
+                        f"Line {lineno}: unescaped `|` inside [[{wikilink}]] - "
+                        f"escape it as `\\|` or run normalize_index_file()"
+                    ),
+                    "auto_fixable": True,
+                })
+
+        for span in re.findall(r"`([^`\n]*)`", line):
+            if span.startswith(ZERO_WIDTH_SPACE):
+                continue
+            if span.lstrip(" ").startswith("="):
+                issues.append({
+                    "severity": "warning",
+                    "check": "index_table",
+                    "file": "index.md",
+                    "detail": (
+                        f"Line {lineno}: inline code span `{span}` starts with `=` - "
+                        f"Dataview will parse it as an inline expression; "
+                        f"run normalize_index_file()"
+                    ),
+                    "auto_fixable": True,
+                })
+
+    return issues
+
+
 async def check_contradictions() -> list[dict]:
     """Use LLM to detect contradictions across articles."""
     from claude_agent_sdk import (
         AssistantMessage,
         ClaudeAgentOptions,
-        ResultMessage,
         TextBlock,
         query,
     )
@@ -269,6 +362,7 @@ def main():
         ("Stale articles", check_stale_articles),
         ("Missing backlinks", check_missing_backlinks),
         ("Sparse articles", check_sparse_articles),
+        ("Index table", check_index_table),
     ]
 
     for name, check_fn in checks:

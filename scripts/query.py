@@ -17,8 +17,9 @@ import asyncio
 import os
 from pathlib import Path
 
-from config import KNOWLEDGE_DIR, QA_DIR, now_iso
-from utils import load_state, read_all_wiki_content, save_state
+from config import DEFAULT_MODEL, KNOWLEDGE_DIR, QA_DIR, now_iso
+from utils import load_state, normalize_index_file, read_all_wiki_content, save_state
+from materialize_records import refresh_projection
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
@@ -52,6 +53,15 @@ After answering, do the following:
 2. Use the Q&A article format from the schema (frontmatter with title, question,
    consulted articles, filed date)
 3. Update {KNOWLEDGE_DIR / 'index.md'} with a new row for this Q&A article
+   - The table has EXACTLY 4 columns: `| [[qa/slug]] | One-line summary | source-file | {timestamp[:10]} |`
+   - A display alias MUST use a backslash-escaped pipe: `[[qa/slug\\|Display Title]]` -
+     a bare `|` inside a wikilink cell breaks the table by splitting the cell
+   - Never emit trailing empty cells (`| | |`) - exactly 4 cells per row, no more
+   - Never write a literal `|` in a cell without escaping it as `\\|`
+   - Never write an inline code span that begins with `=` (e.g. bare `` `==` ``) -
+     Dataview parses a leading `=` in a code span as an inline expression and
+     renders a parsing-error block. If you need to document the `==` operator,
+     give it surrounding context instead, e.g. `` `status == "active"` ``
 4. Append to {KNOWLEDGE_DIR / 'log.md'}:
    ## [{timestamp}] query (filed) | question summary
    - Question: {question}
@@ -92,7 +102,7 @@ consulting the knowledge base below.
                 allowed_tools=tools,
                 permission_mode="acceptEdits",
                 max_turns=15,
-                model=os.environ.get("CMC_MODEL", "sonnet"),
+                model=os.environ.get("CMC_MODEL", DEFAULT_MODEL),
             ),
         ):
             if isinstance(message, AssistantMessage):
@@ -109,6 +119,12 @@ consulting the knowledge base below.
     state["query_count"] = state.get("query_count", 0) + 1
     state["total_cost"] = state.get("total_cost", 0.0) + cost
     save_state(state)
+
+    if file_back:
+        if normalize_index_file():
+            print("  Repaired index.md formatting.")
+        # File-back appends knowledge/log.md; keep the records/ projection current.
+        refresh_projection()
 
     return answer
 
