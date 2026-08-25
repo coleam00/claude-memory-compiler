@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 from pathlib import Path
 
 from config import KNOWLEDGE_DIR, QA_DIR, now_iso
@@ -91,6 +92,7 @@ consulting the knowledge base below.
                 allowed_tools=tools,
                 permission_mode="acceptEdits",
                 max_turns=15,
+                model=os.environ.get("CMC_MODEL", "sonnet"),
             ),
         ):
             if isinstance(message, AssistantMessage):

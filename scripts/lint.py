@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 from pathlib import Path
 
 from config import KNOWLEDGE_DIR, REPORTS_DIR, now_iso, today_iso
@@ -187,6 +188,7 @@ Do NOT output anything else - no preamble, no explanation, just the formatted li
                 cwd=str(ROOT_DIR),
                 allowed_tools=[],
                 max_turns=2,
+                model=os.environ.get("CMC_MODEL", "sonnet"),
             ),
         ):
             if isinstance(message, AssistantMessage):

@@ -154,11 +154,17 @@ def main() -> None:
 
     creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
+    stderr_log = SCRIPTS_DIR / "flush-stderr.log"
     try:
+        stderr_handle = open(stderr_log, "a", encoding="utf-8")
+        stderr_handle.write(
+            f"\n--- {datetime.now(timezone.utc).astimezone().isoformat()} session={session_id} (pre-compact) ---\n"
+        )
+        stderr_handle.flush()
         subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=stderr_handle,
             creationflags=creation_flags,
         )
         logging.info("Spawned flush.py for session %s (%d turns, %d chars)", session_id, turn_count, len(context))

@@ -8,8 +8,11 @@ scripts/state.json
 scripts/last-flush.json
 scripts/flush.log
 scripts/compile.log
+scripts/flush-stderr.log
+scripts/cron-backstop.log
 scripts/session-flush-*
 scripts/flush-context-*
+scripts/backfill-*.md
 
 # Generated content (built up per-user by hooks and scripts)
 daily/
@@ -29,3 +32,6 @@ scripts/uv.lock
 Thumbs.db
 
 .obsidian/
+
+# Local search index (user-specific, not shared)
+.memsearch/

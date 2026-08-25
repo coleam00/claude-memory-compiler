@@ -13,6 +13,12 @@ Usage:
 
 from __future__ import annotations
 
+# Recursion prevention: set BEFORE any imports that might trigger Claude.
+# Without this, the Agent SDK spawns a Claude Code subprocess, whose own
+# SessionEnd hook fires at exit -> flush.py -> another compile.py, looping.
+import os
+os.environ["CLAUDE_INVOKED_BY"] = "knowledge_compiler"
+
 import argparse
 import asyncio
 import sys
@@ -137,6 +143,7 @@ Read the daily log above and compile it into wiki articles following the schema 
                 allowed_tools=["Read", "Write", "Edit", "Glob", "Grep"],
                 permission_mode="acceptEdits",
                 max_turns=30,
+                model=os.environ.get("CMC_MODEL", "sonnet"),
             ),
         ):
             if isinstance(message, AssistantMessage):
@@ -148,17 +155,16 @@ Read the daily log above and compile it into wiki articles following the schema 
                 print(f"  Cost: ${cost:.4f}")
     except Exception as e:
         print(f"  Error: {e}")
-        return 0.0
-
-    # Update state
-    rel_path = log_path.name
-    state.setdefault("ingested", {})[rel_path] = {
-        "hash": file_hash(log_path),
-        "compiled_at": now_iso(),
-        "cost_usd": cost,
-    }
-    state["total_cost"] = state.get("total_cost", 0.0) + cost
-    save_state(state)
+    finally:
+        if cost > 0:
+            rel_path = log_path.name
+            state.setdefault("ingested", {})[rel_path] = {
+                "hash": file_hash(log_path),
+                "compiled_at": now_iso(),
+                "cost_usd": cost,
+            }
+            state["total_cost"] = state.get("total_cost", 0.0) + cost
+            save_state(state)
 
     return cost
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 os.environ["CLAUDE_INVOKED_BY"] = "memory_flush"
 
+import argparse
 import asyncio
 import json
 import logging
@@ -53,20 +54,25 @@ def save_flush_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
 
 
-def append_to_daily_log(content: str, section: str = "Session") -> None:
-    """Append content to today's daily log."""
-    today = datetime.now(timezone.utc).astimezone()
-    log_path = DAILY_DIR / f"{today.strftime('%Y-%m-%d')}.md"
+def append_to_daily_log(content: str, section: str = "Session", date_override: str | None = None, session_id: str | None = None) -> None:
+    """Append content to a daily log. Defaults to today; pass YYYY-MM-DD to backfill."""
+    now = datetime.now(timezone.utc).astimezone()
+    log_date = date_override or now.strftime("%Y-%m-%d")
+    log_path = DAILY_DIR / f"{log_date}.md"
 
     if not log_path.exists():
         DAILY_DIR.mkdir(parents=True, exist_ok=True)
         log_path.write_text(
-            f"# Daily Log: {today.strftime('%Y-%m-%d')}\n\n## Sessions\n\n## Memory Maintenance\n\n",
+            f"# Daily Log: {log_date}\n\n## Sessions\n\n## Memory Maintenance\n\n",
             encoding="utf-8",
         )
 
-    time_str = today.strftime("%H:%M")
-    entry = f"### {section} ({time_str})\n\n{content}\n\n"
+    # Use real wall-clock time for the heading so multiple flushes for the same
+    # backfill date stay distinguishable.
+    time_str = now.strftime("%H:%M")
+    base = f"{section} ({time_str})" if not date_override else f"{section} (backfill {time_str})"
+    label = f"{base} [sid:{session_id}]" if session_id else base
+    entry = f"### {label}\n\n{content}\n\n"
 
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(entry)
@@ -123,6 +129,7 @@ respond with exactly: FLUSH_OK
                 cwd=str(ROOT),
                 allowed_tools=[],
                 max_turns=2,
+                model=os.environ.get("CMC_MODEL", "sonnet"),
             ),
         ):
             if isinstance(message, AssistantMessage):
@@ -190,12 +197,17 @@ def maybe_trigger_compilation() -> None:
 
 
 def main():
-    if len(sys.argv) < 3:
-        logging.error("Usage: %s <context_file.md> <session_id>", sys.argv[0])
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Flush conversation context into daily log.")
+    parser.add_argument("context_file", help="Path to extracted conversation context (.md)")
+    parser.add_argument("session_id", help="Source session id (used for dedup)")
+    parser.add_argument("--date", default=None, help="Override target date (YYYY-MM-DD); used for backfill")
+    parser.add_argument("--no-compile", action="store_true", help="Skip end-of-day compile trigger")
+    args = parser.parse_args()
 
-    context_file = Path(sys.argv[1])
-    session_id = sys.argv[2]
+    context_file = Path(args.context_file)
+    session_id = args.session_id
+    date_override = args.date
+    skip_compile = args.no_compile
 
     logging.info("flush.py started for session %s, context: %s", session_id, context_file)
 
@@ -229,14 +241,16 @@ def main():
     if "FLUSH_OK" in response:
         logging.info("Result: FLUSH_OK")
         append_to_daily_log(
-            "FLUSH_OK - Nothing worth saving from this session", "Memory Flush"
+            "FLUSH_OK - Nothing worth saving from this session", "Memory Flush",
+            date_override=date_override,
+            session_id=session_id,
         )
     elif "FLUSH_ERROR" in response:
         logging.error("Result: %s", response)
-        append_to_daily_log(response, "Memory Flush")
+        append_to_daily_log(response, "Memory Flush", date_override=date_override, session_id=session_id)
     else:
         logging.info("Result: saved to daily log (%d chars)", len(response))
-        append_to_daily_log(response, "Session")
+        append_to_daily_log(response, "Session", date_override=date_override, session_id=session_id)
 
     # Update dedup state
     save_flush_state({"session_id": session_id, "timestamp": time.time()})
@@ -244,9 +258,10 @@ def main():
     # Clean up context file
     context_file.unlink(missing_ok=True)
 
-    # End-of-day auto-compilation: if it's past the compile hour and today's
-    # log hasn't been compiled yet, trigger compile.py in the background.
-    maybe_trigger_compilation()
+    # End-of-day auto-compilation: skip during backfill (driver triggers
+    # compile once at the end) and skip if explicitly suppressed.
+    if not skip_compile and not date_override:
+        maybe_trigger_compilation()
 
     logging.info("Flush complete for session %s", session_id)
 

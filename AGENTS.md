@@ -5,7 +5,7 @@
 
 ## The Compiler Analogy
 
-```
+```text
 daily/          = source code    (your conversations - the raw material)
 LLM             = compiler       (extracts and organizes knowledge)
 knowledge/      = executable     (structured, queryable knowledge base)
@@ -23,7 +23,7 @@ You don't manually organize your knowledge. You have conversations, and the LLM 
 
 Daily logs capture what happened in your AI coding sessions. These are the "raw sources" - append-only, never edited after the fact.
 
-```
+```text
 daily/
 ├── 2026-04-01.md
 ├── 2026-04-02.md
@@ -63,7 +63,7 @@ Each file follows this format:
 
 The LLM owns this directory entirely. Humans read it but rarely edit it directly.
 
-```
+```text
 knowledge/
 ├── index.md              # Master catalog - every article with one-line summary
 ├── log.md                # Append-only chronological build log
@@ -127,6 +127,7 @@ One article per atomic piece of knowledge. These are facts, patterns, decisions,
 title: "Concept Name"
 aliases: [alternate-name, abbreviation]
 tags: [domain, topic]
+summary: "1-2 sentence overview that conveys what this concept is and why it matters. This is the same content as the lead paragraph below — duplicating it into frontmatter makes it queryable from Bases/Dataview without parsing the body."
 sources:
   - "daily/2026-04-01.md"
   - "daily/2026-04-03.md"
@@ -136,7 +137,7 @@ updated: 2026-04-03
 
 # Concept Name
 
-[2-4 sentence core explanation]
+[2-4 sentence core explanation — should match `summary:` in spirit; the body version can be slightly longer/more detailed]
 
 ## Key Points
 
@@ -163,6 +164,7 @@ Cross-cutting synthesis linking 2+ concepts. Created when a conversation reveals
 ```markdown
 ---
 title: "Connection: X and Y"
+summary: "1-2 sentence overview of the non-obvious relationship between X and Y."
 connects:
   - "concepts/concept-x"
   - "concepts/concept-y"
@@ -242,6 +244,7 @@ When processing a daily log:
 7. APPEND to `knowledge/log.md`
 
 **Important guidelines:**
+
 - A single daily log may touch 3-10 knowledge articles
 - Prefer updating existing articles over creating near-duplicates
 - Use Obsidian-style `[[wikilinks]]` with full relative paths from knowledge/
@@ -281,14 +284,14 @@ Output: a markdown report with severity levels (error, warning, suggestion).
 - **Writing style:** Encyclopedia-style, factual, third-person where appropriate
 - **Dates:** ISO 8601 (YYYY-MM-DD for dates, full ISO for timestamps in log.md)
 - **File naming:** lowercase, hyphens for spaces (e.g., `supabase-row-level-security.md`)
-- **Frontmatter:** Every article must have YAML frontmatter with at minimum: title, sources, created, updated
+- **Frontmatter:** Every article must have YAML frontmatter with at minimum: title, summary, sources, created, updated. The `summary:` field is a 1-2 sentence overview, identical in intent to the lead paragraph after the H1.
 - **Sources:** Always link back to the daily log(s) that contributed to an article
 
 ---
 
 ## Full Project Structure
 
-```
+```text
 llm-personal-kb/
 |-- .claude/
 |   |-- settings.json                # Hook configuration (auto-activates in Claude Code)
@@ -308,6 +311,9 @@ llm-personal-kb/
 |   |-- query.py                     #   Ask questions (index-guided, no RAG)
 |   |-- lint.py                      #   7 health checks
 |   |-- flush.py                     #   Extract memories from conversations (background)
+|   |-- backfill.py                  #   Backfill historical transcripts into daily logs
+|   |-- backfill_summary.py          #   Backfill summary: frontmatter into existing articles
+|   |-- cron-backstop.sh             #   Nightly backstop for missed SessionEnd hooks
 |   |-- config.py                    #   Path constants
 |   |-- utils.py                     #   Shared helpers
 |-- hooks/                           # Claude Code hooks
@@ -340,19 +346,23 @@ Commands use simple relative paths from the project root. Empty `matcher` catche
 ### Hook Details
 
 **`session-start.py`** (SessionStart)
+
 - Pure local I/O, no API calls, runs in under 1 second
 - Reads `knowledge/index.md` and the most recent daily log
 - Outputs JSON to stdout: `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "..."}}`
 - Claude sees the knowledge base index at the start of every session
 - Max context: 20,000 characters
+- Index is filtered to the `KB_INDEX_MAX_ROWS` most-recently-updated rows (default 10) sorted newest-first. Robust to markdown-table padding from formatters. Override with `KB_INDEX_MAX_ROWS=N` env var.
 
 **`session-end.py`** (SessionEnd)
+
 - Reads hook input from stdin (JSON with `session_id`, `transcript_path`, `cwd`)
 - Copies the raw JSONL transcript to a temp file (no parsing in the hook - keeps it fast)
 - Spawns `flush.py` as a fully detached background process
 - Recursion guard: exits immediately if `CLAUDE_INVOKED_BY` env var is set
 
 **`pre-compact.py`** (PreCompact)
+
 - Same architecture as session-end.py
 - Fires before Claude Code auto-compacts the context window
 - Guards against empty `transcript_path` (known Claude Code bug #13668)
@@ -363,20 +373,24 @@ Commands use simple relative paths from the project root. Empty `matcher` catche
 ### Background Flush Process (`flush.py`)
 
 Spawned by both hooks as a fully detached background process:
+
 - **Windows:** `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` flags
 - **Mac/Linux:** `start_new_session=True`
 
-This ensures flush.py survives after Claude Code's hook process exits.
+This ensures flush.py survives after Claude Code's hook process exits. Stderr is appended to `scripts/flush-stderr.log` so SDK errors (normally swallowed as "Check stderr for details") are inspectable.
 
 **What flush.py does:**
+
 1. Sets `CLAUDE_INVOKED_BY=memory_flush` env var (prevents recursive hook firing)
 2. Reads the pre-extracted conversation context from the temp `.md` file
 3. Skips if context is empty or if same session was flushed within 60 seconds (deduplication)
-4. Calls Claude Agent SDK (`query()` with `allowed_tools=[]`, `max_turns=2`)
+4. Calls Claude Agent SDK (`query()` with `allowed_tools=[]`, `max_turns=2`). Model defaults to `sonnet`; override with `CMC_MODEL` env var.
 5. Claude decides what's worth saving - returns structured bullet points or `FLUSH_OK`
-6. Appends result to `daily/YYYY-MM-DD.md`
+6. Appends result to `daily/YYYY-MM-DD.md`. Section headings include `[sid:<session_id>]` for idempotent deduplication.
 7. Cleans up temp context file
-8. **End-of-day auto-compilation:** If it's past 6 PM local time (`COMPILE_AFTER_HOUR = 18`) and today's daily log has changed since its last compilation (hash comparison against `state.json`), spawns `compile.py` as another detached background process. This means compilation happens automatically once a day without needing a cron job or manual trigger.
+8. **End-of-day auto-compilation:** If it's past 6 PM local time (`COMPILE_AFTER_HOUR = 18`) and today's daily log has changed since its last compilation (hash comparison against `state.json`), spawns `compile.py` as another detached background process. Skipped when `--date` is passed (backfill mode) or `--no-compile` is set.
+
+**Backfill mode:** Pass `--date YYYY-MM-DD` to write into a historical daily log instead of today's. Used by `backfill.py`.
 
 ### JSONL Transcript Format
 
@@ -419,6 +433,7 @@ async for message in query(
 - Cost: ~$0.45-0.65 per daily log (increases as KB grows)
 
 **CLI:**
+
 ```bash
 uv run python scripts/compile.py              # compile new/changed only
 uv run python scripts/compile.py --all        # force recompile everything
@@ -433,6 +448,7 @@ Loads the entire knowledge base into context (index + all articles). No RAG.
 At personal KB scale (50-500 articles), the LLM reading a structured index outperforms vector similarity. The LLM understands what you're really asking; cosine similarity just finds similar words.
 
 **CLI:**
+
 ```bash
 uv run python scripts/query.py "What auth patterns do I use?"
 uv run python scripts/query.py "What's my error handling strategy?" --file-back
@@ -455,6 +471,7 @@ Seven checks:
 | Contradictions | LLM | Conflicting claims across articles |
 
 **CLI:**
+
 ```bash
 uv run python scripts/lint.py                    # all checks
 uv run python scripts/lint.py --structural-only  # skip LLM check (free)
@@ -462,11 +479,46 @@ uv run python scripts/lint.py --structural-only  # skip LLM check (free)
 
 Reports saved to `reports/lint-YYYY-MM-DD.md`.
 
+### backfill.py - Historical Transcript Importer
+
+Walks `~/.claude/projects/*/*.jsonl`, groups messages by `(local-date, session_id)`, and calls `flush.py --date` for each group so historical conversations land in the correct daily log.
+
+**Deduplication:** Each flushed section heading includes `[sid:<session_id>]`. Before flushing, `backfill.py` checks whether that marker already appears in the target daily log file, and skips sessions that were already recorded. Re-runs are safe and free.
+
+**CLI:**
+
+```bash
+uv run python scripts/backfill.py --date 2026-04-20
+uv run python scripts/backfill.py --from 2026-04-14 --to 2026-04-20
+uv run python scripts/backfill.py --date 2026-04-20 --dry-run
+uv run python scripts/backfill.py --date 2026-04-20 --projects '*whisper*'
+uv run python scripts/backfill.py --date 2026-04-20 --no-compile
+uv run python scripts/backfill.py --date 2026-04-20 --yes  # skip confirmation
+```
+
+Cost estimate is printed before running. `--max-cost` (default $20) aborts if estimate exceeds the threshold.
+
+### backfill_summary.py - Summary Frontmatter Backfiller
+
+Lifts the first prose paragraph after the `# H1` from each concept/connection article and inserts it as `summary:` frontmatter. Skips articles that already have `summary:`. Safe to re-run.
+
+```bash
+uv run python scripts/backfill_summary.py --dry-run  # preview
+uv run python scripts/backfill_summary.py             # write
+```
+
+### cron-backstop.sh - Nightly Hook Safety Net
+
+Runs nightly to catch any sessions whose `SessionEnd` hook didn't fire (crashed shell, `kill -9`, hook regression). Calls `backfill.py --date yesterday --yes`. Since backfill is idempotent, re-runs cost nothing.
+
+Register as a launchd job for hands-off operation. The script derives `ROOT` from its own location so it survives vault relocations.
+
 ---
 
 ## State Tracking
 
 `scripts/state.json` tracks:
+
 - `ingested` - map of daily log filenames to SHA-256 hashes, compilation timestamps, and costs
 - `query_count` - total queries run
 - `last_lint` - timestamp of most recent lint
@@ -481,6 +533,7 @@ Both are gitignored and regenerated automatically.
 ## Dependencies
 
 `pyproject.toml` (at project root):
+
 - `claude-agent-sdk>=0.1.29` - Claude Agent SDK for LLM calls with tool use
 - `python-dotenv>=1.0.0` - Environment variable management
 - `tzdata>=2024.1` - Timezone data
