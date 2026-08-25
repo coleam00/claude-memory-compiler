@@ -1,9 +1,10 @@
 """
-Backfill daily logs from historical Claude Code transcripts.
+Backfill Capture Records from historical Claude Code transcripts.
 
 Walks ~/.claude/projects/*/*.jsonl, groups messages by (local-date, session_id),
-and runs flush.py with --date for each group so historical conversations get
-captured into the right daily log. After all flushes, optionally runs compile.py.
+and runs flush.py with --date for each group so historical conversations become
+direct Capture Records on the right record day. After all flushes, optionally
+runs compile.py.
 
 Usage:
     uv run python scripts/backfill.py --date 2026-04-20
@@ -23,13 +24,16 @@ import os
 import subprocess
 import sys
 from collections import defaultdict
-from datetime import datetime, date as date_cls, timedelta, timezone
+from datetime import date as date_cls
+from datetime import datetime, timedelta
 from pathlib import Path
 
+from capture_records import list_capture_records
+
 ROOT = Path(__file__).resolve().parent.parent
-DAILY_DIR = ROOT / "daily"
 SCRIPTS_DIR = ROOT / "scripts"
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
+CONTEXT_DIR = SCRIPTS_DIR  # scratch .md context files; patchable in tests
 
 MAX_TURNS_PER_SESSION = 60
 MAX_CONTEXT_CHARS = 30_000
@@ -120,6 +124,40 @@ def extract_dated_messages(transcript: Path, target_dates: set[date_cls]) -> dic
     return out
 
 
+def decode_project_cwd(project_dir_name: str) -> str | None:
+    """Best-effort decode of a ~/.claude/projects directory name to a path.
+
+    Claude Code encodes project paths by replacing "/" with "-", so
+    "-Users-prime-Working-obsidian" decodes to "/Users/prime/Working/obsidian".
+    Returns None for names that do not look like encoded absolute paths.
+    """
+    if not project_dir_name.startswith("-") or len(project_dir_name) < 2:
+        return None
+    return "/" + project_dir_name[1:].replace("-", "/")
+
+
+def capture_source_project(record) -> str | None:
+    """Read source_project from a direct Capture Record's frontmatter."""
+    path = getattr(record, "path", None)
+    if path is None:
+        return None
+    try:
+        for line in Path(path).read_text(encoding="utf-8").splitlines():
+            if line == "---" and "source_project:" not in line:
+                continue
+            if line.startswith("source_project:"):
+                value = line.partition(":")[2].strip()
+                try:
+                    return json.loads(value)
+                except json.JSONDecodeError:
+                    return value.strip("\"'")
+            if line == "---":
+                break
+    except OSError:
+        return None
+    return None
+
+
 def trim_context(turns: list[str]) -> str:
     recent = turns[-MAX_TURNS_PER_SESSION:]
     ctx = "\n".join(recent)
@@ -181,21 +219,25 @@ def main() -> int:
         print(f"All sessions had < {MIN_TURNS_TO_FLUSH} turns. Nothing to flush.")
         return 0
 
-    # Durable dedup: skip sessions already recorded in their target daily log.
-    # flush.py now writes "[sid:<session_id>]" into each section heading, so a
-    # substring match against the daily log is sufficient.
+    # Durable dedup: skip sessions that already have a direct Capture Record.
+    # Keyed by (record day, source session) read from the captures' record
+    # identity. Backfill composes its session ids as
+    # "backfill-<day>-<transcript-stem>"; hook-driven captures use the bare id,
+    # so both spellings are checked.
+    captured_keys: set[tuple[str, str]] = set()
+    for record in list_capture_records():
+        if record.source_sid and record.record_day:
+            captured_keys.add((str(record.record_day), record.source_sid))
+
     skipped_dedup = 0
-    for d in list(by_date.keys()):
-        log_path = DAILY_DIR / f"{d.isoformat()}.md"
-        if not log_path.exists():
-            continue
-        try:
-            log_text = log_path.read_text(encoding="utf-8")
-        except OSError:
-            continue
+    for d in sorted(by_date):
         kept: list[tuple[str, str, int]] = []
         for sid, proj, n_turns in by_date[d]:
-            if f"[sid:{sid}]" in log_text or f"[sid:backfill-{d.isoformat()}-{sid}]" in log_text:
+            composed_sid = f"backfill-{d.isoformat()}-{sid}"
+            if (d.isoformat(), sid) in captured_keys or (
+                d.isoformat(),
+                composed_sid,
+            ) in captured_keys:
                 skipped_dedup += 1
             else:
                 kept.append((sid, proj, n_turns))
@@ -205,7 +247,7 @@ def main() -> int:
             del by_date[d]
 
     if skipped_dedup:
-        print(f"\n(skipping {skipped_dedup} sessions already recorded in target daily log)")
+        print(f"\n(skipping {skipped_dedup} sessions with an existing direct Capture Record)")
 
     if not by_date:
         print("All sessions already flushed. Nothing to do.")
@@ -245,7 +287,6 @@ def main() -> int:
             return 1
 
     # Run flushes sequentially (avoid parallel SDK calls)
-    DAILY_DIR.mkdir(parents=True, exist_ok=True)
     flush_script = SCRIPTS_DIR / "flush.py"
     successes, failures = 0, 0
 
@@ -254,18 +295,22 @@ def main() -> int:
             turns = grouped[(d, sid, proj)]
             ctx = trim_context(turns)
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            ctx_file = SCRIPTS_DIR / f"backfill-{d.isoformat()}-{sid[:8]}-{stamp}.md"
+            ctx_file = CONTEXT_DIR / f"backfill-{d.isoformat()}-{sid[:8]}-{stamp}.md"
             ctx_file.write_text(ctx, encoding="utf-8")
 
             print(f"  flushing {d.isoformat()} {sid[:8]} ({proj[:40]})...", end=" ", flush=True)
-            # Date-scoped session id so dedup only catches same-day same-sid duplicates
-            # (e.g. cross-project mirrored project dirs), not different days.
+            # Date-scoped session id so dedup only catches same-day same-sid
+            # duplicates (e.g. cross-project mirrored project dirs), and pass
+            # the decoded project path as the capture's source project/cwd.
             cmd = [
                 "uv", "run", "--directory", str(ROOT), "python", str(flush_script),
                 str(ctx_file), f"backfill-{d.isoformat()}-{sid}",
                 "--date", d.isoformat(),
                 "--no-compile",
             ]
+            source_cwd = decode_project_cwd(proj)
+            if source_cwd:
+                cmd += ["--source-cwd", source_cwd]
             try:
                 # Use unique session id per (date, sid) so dedup doesn't kill repeated flushes
                 env = os.environ.copy()
