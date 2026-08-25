@@ -1,230 +1,406 @@
-"""
-Compile daily conversation logs into structured knowledge articles.
+"""Compile pending Capture Records into knowledge articles via OMP agents.
 
-This is the "LLM compiler" - it reads daily logs (source code) and produces
-organized knowledge articles (the executable).
+Each substantive (narrative) Capture Record is compiled by exactly one OMP
+agent. The prompt names only the record and its same-day Raw Input paths; the
+agent reads the knowledge index and relevant articles itself, so article
+bodies never travel through argv or stdin.
 
 Usage:
-    uv run python compile.py                    # compile new/changed logs only
-    uv run python compile.py --all              # force recompile everything
-    uv run python compile.py --file daily/2026-04-01.md  # compile a specific log
-    uv run python compile.py --dry-run          # show what would be compiled
+    uv run python scripts/compile.py                # compile pending records
+    uv run python scripts/compile.py --all          # recompile every narrative Capture Record
+    uv run python scripts/compile.py --file records/captures/2026-08-24/x.md
+    uv run python scripts/compile.py --dry-run      # show assignments only
 """
 
 from __future__ import annotations
 
-# Recursion prevention: set BEFORE any imports that might trigger Claude.
-# Without this, the Agent SDK spawns a Claude Code subprocess, whose own
-# SessionEnd hook fires at exit -> flush.py -> another compile.py, looping.
+# Recursion prevention: set BEFORE any imports that might trigger an agent.
+# Without this, a spawned OMP subprocess's own SessionEnd hook fires at exit
+# -> flush.py -> another compile.py, looping.
 import os
+
 os.environ["CLAUDE_INVOKED_BY"] = "knowledge_compiler"
 
 import argparse
-import asyncio
+import fcntl
+import hashlib
+import json
+import re
+import subprocess
 import sys
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
-from config import AGENTS_FILE, CONCEPTS_DIR, CONNECTIONS_DIR, DAILY_DIR, KNOWLEDGE_DIR, now_iso
-from utils import (
-    file_hash,
-    list_raw_files,
-    list_wiki_articles,
-    load_state,
-    read_wiki_index,
-    save_state,
+from capture_records import (
+    CaptureRecord,
+    capture_state_key,
+    discover_unprocessed_raw,
+    list_capture_records,
+    read_capture,
+    tag_raw_inputs,
 )
+from config import COMPILE_LOCK_FILE as LOCK_FILE
+from config import COMPILE_MODELS, ROOT_DIR, STATE_FILE, now_iso
+from materialize_records import refresh_projection
+from utils import load_state, normalize_index_file
 
-# ── Paths for the LLM to use ──────────────────────────────────────────
-ROOT_DIR = Path(__file__).resolve().parent.parent
+# ── Compilation contract constants ────────────────────────────────────
+PROMPT_PREFIX = "/skill:unslop"
+LEGACY_BOOTSTRAP_MODEL = "legacy"
+SUBSTANTIVE_STATUS = "narrative"
+DIAGNOSTIC_TAIL_LINES = 20
+
+_FRONTMATTER_FIELD_RE = re.compile(r'^([a-z0-9_]+):\s*"?(.*?)"?\s*$', re.MULTILINE)
 
 
-async def compile_daily_log(log_path: Path, state: dict) -> float:
-    """Compile a single daily log into knowledge articles.
+def sha256_file(path: Path) -> str:
+    """Full SHA-256 hexdigest of a file's bytes."""
 
-    Returns the API cost of the compilation.
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _read_frontmatter(path: Path) -> dict[str, str]:
+    """Minimal frontmatter key/value read for fields CaptureRecord omits."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    if not text.startswith("---"):
+        return {}
+    end = text.find("\n---", 3)
+    if end == -1:
+        return {}
+    return dict(_FRONTMATTER_FIELD_RE.findall(text[3:end]))
+
+
+def _day_str(record_day) -> str:
+    return str(record_day)[:10]
+
+
+# ── Selection ─────────────────────────────────────────────────────────
+
+
+def select_pending(
+    records: tuple[CaptureRecord, ...], state: dict, *, force: bool = False
+) -> list[CaptureRecord]:
+    """Sorted substantive records that still need compilation.
+
+    A record is pending when it is narrative and either never compiled or its
+    payload changed since the recorded compile (changed-payload retry).
     """
-    from claude_agent_sdk import (
-        AssistantMessage,
-        ClaudeAgentOptions,
-        ResultMessage,
-        TextBlock,
-        query,
+    compiled = state.get("compiled_captures", {})
+    pending = []
+    for record in sorted(records, key=lambda r: (_day_str(r.record_day), r.path.name)):
+        if record.capture_status != SUBSTANTIVE_STATUS:
+            continue
+        if not force:
+            previous = compiled.get(capture_state_key(record))
+            if previous and previous.get("payload_sha256") == record.payload_sha256:
+                continue
+        pending.append(record)
+    return pending
+
+
+def assign_models(pending: list[CaptureRecord]) -> list[tuple[CaptureRecord, str]]:
+    """Round-robin model assignment over sorted records; counts differ by ≤1."""
+    return [(record, COMPILE_MODELS[i % len(COMPILE_MODELS)]) for i, record in enumerate(pending)]
+
+
+def plan_raw_attachments(
+    pending: list[CaptureRecord], state: dict
+) -> dict[str, tuple[Path, ...]]:
+    """Attach a day's unprocessed Raw Inputs to that day's first pending record only."""
+    attachments: dict[str, tuple[Path, ...]] = {
+        capture_state_key(record): () for record in pending
+    }
+    seen_days: set[str] = set()
+    for record in pending:
+        day = _day_str(record.record_day)
+        if day in seen_days:
+            continue
+        seen_days.add(day)
+        attachments[capture_state_key(record)] = discover_unprocessed_raw(day, state)
+    return attachments
+
+
+def bootstrap_legacy_compiles(records: tuple[CaptureRecord, ...], state: dict) -> int:
+    """Mark historical records compiled when their aggregate hash matches legacy state.
+
+    Legacy whole-file daily hashes live in ``state['ingested']``. Every record
+    whose ``source_aggregate_sha256`` starts with the matching daily hash was
+    already part of a compiled aggregate; bootstrapping them prevents replaying
+    already compiled history on the first post-cutover run.
+    """
+    ingested = state.get("ingested", {})
+    compiled = state.setdefault("compiled_captures", {})
+    bootstrapped = 0
+    for record in records:
+        key = capture_state_key(record)
+        if key in compiled:
+            continue
+        frontmatter = _read_frontmatter(record.path)
+        aggregate_sha = frontmatter.get("source_aggregate_sha256", "")
+        source_name = Path(
+            frontmatter.get("source_aggregate_file")
+            or frontmatter.get("source_file")
+            or f"daily/{_day_str(record.record_day)}.md"
+        ).name
+        legacy_hash = ingested.get(source_name, {}).get("hash")
+        if not (aggregate_sha and legacy_hash and aggregate_sha.startswith(legacy_hash)):
+            continue
+        compiled[key] = {
+            "payload_sha256": record.payload_sha256,
+            "compiled_at": now_iso(),
+            "model": LEGACY_BOOTSTRAP_MODEL,
+        }
+        bootstrapped += 1
+    return bootstrapped
+
+
+# ── Prompt / command ──────────────────────────────────────────────────
+
+
+def build_prompt(record: CaptureRecord, raw_paths: tuple[Path, ...]) -> str:
+    """Prompt naming exactly one Capture Record plus Raw Input paths."""
+    lines = [
+        PROMPT_PREFIX,
+        "",
+        "You are a knowledge compiler working inside this Obsidian vault.",
+        "Compile exactly one Capture Record into knowledge articles.",
+        "",
+        "## Capture Record",
+        "",
+        str(record.path),
+        "",
+        "## Same-day Raw Inputs",
+        "",
+    ]
+    if raw_paths:
+        lines.extend(str(path) for path in raw_paths)
+    else:
+        lines.append("(none)")
+    lines.extend(
+        [
+            "",
+            "## Procedure",
+            "",
+            "1. Read knowledge/index.md first to see what the wiki already covers.",
+            "2. Read the Capture Record listed above.",
+            "3. Read only the existing knowledge articles relevant to this record.",
+            "4. Write or update articles following the AGENTS.md schema, then update",
+            "   knowledge/index.md and append a timestamped entry to knowledge/log.md.",
+            "",
+            "## Rules",
+            "",
+            "- Index table rows have exactly 4 cells; escape alias pipes as \\| and never",
+            "  start an inline code span with =.",
+            "- Every new article needs complete YAML frontmatter and [[wikilinks]] to at",
+            "  least 2 other articles.",
+        ]
     )
+    return "\n".join(lines)
 
-    log_content = log_path.read_text(encoding="utf-8")
-    schema = AGENTS_FILE.read_text(encoding="utf-8")
-    wiki_index = read_wiki_index()
 
-    # Read existing articles for context
-    existing_articles_context = ""
-    existing = {}
-    for article_path in list_wiki_articles():
-        rel = article_path.relative_to(KNOWLEDGE_DIR)
-        existing[str(rel)] = article_path.read_text(encoding="utf-8")
+def build_command(model: str, prompt: str) -> list[str]:
+    """The exact OMP invocation; the prompt is paths only, never article bodies."""
+    return [
+        "omp",
+        "-p",
+        "--no-session",
+        "--auto-approve",
+        "--cwd",
+        str(ROOT_DIR),
+        "--model",
+        model,
+        prompt,
+    ]
 
-    if existing:
-        parts = []
-        for rel_path, content in existing.items():
-            parts.append(f"### {rel_path}\n```markdown\n{content}\n```")
-        existing_articles_context = "\n\n".join(parts)
+
+def invoke_omp(command: list[str]) -> tuple[bool, str]:
+    """Run one OMP agent, capturing stdout/stderr for diagnostics."""
+    environment = dict(os.environ)
+    environment["CLAUDE_INVOKED_BY"] = "knowledge_compiler"
+    completed = subprocess.run(
+        command, capture_output=True, text=True, env=environment, check=False
+    )
+    output = (completed.stdout or "") + (completed.stderr or "")
+    return completed.returncode == 0, output
+
+
+# ── Locking / state persistence ───────────────────────────────────────
+
+
+@contextmanager
+def compile_lock():
+    """One global interprocess lock: state load through saves run strictly
+    sequentially, so no compile can snapshot ahead of the lock."""
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(LOCK_FILE, "w")  # noqa: SIM115 - closed in finally below
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+def save_state_atomic(state: dict) -> None:
+    """Atomic replace so a crash never leaves a torn state.json."""
+    descriptor, temp_path = tempfile.mkstemp(
+        dir=STATE_FILE.parent, prefix=".state-", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, indent=2)
+        os.replace(temp_path, STATE_FILE)
+    except BaseException:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+
+
+# ── Per-record compilation ────────────────────────────────────────────
+
+
+def _relative_key(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(ROOT_DIR).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def compile_record(
+    record: CaptureRecord,
+    model: str,
+    raw_paths: tuple[Path, ...],
+    state: dict,
+) -> bool:
+    """Invoke one OMP agent; persist success-only state/tag transitions."""
+    key = capture_state_key(record)
+    print(f"\n[{model}] Compiling {record.path.name} ({len(raw_paths)} raw inputs)...")
+
+    if raw_paths:
+        # Claim the inputs before invocation so a concurrent compiler cannot
+        # double-attach them; compiled tags land only after success.
+        tag_raw_inputs(raw_paths, compiled=False, capture_id=key)
+
+    ok, output = invoke_omp(build_command(model, build_prompt(record, raw_paths)))
+    if not ok:
+        tail = "\n".join(output.splitlines()[-DIAGNOSTIC_TAIL_LINES:])
+        print(f"  Failed.\n{tail}", file=sys.stderr)
+        return False
 
     timestamp = now_iso()
+    state.setdefault("compiled_captures", {})[key] = {
+        "payload_sha256": record.payload_sha256,
+        "compiled_at": timestamp,
+        "model": model,
+    }
+    if raw_paths:
+        # Final compiled tags land first so the stored hash covers exactly
+        # the tagged bytes on disk; discovery excludes a raw only when its
+        # current sha256 matches, so hashing pre-tag bytes would re-attach
+        # every already-compiled input on the next run.
+        tag_raw_inputs(raw_paths, compiled=True, capture_id=key)
+    raw_compiled = state.setdefault("compiled_raw_inputs", {})
+    for path in raw_paths:
+        if not path.exists():
+            continue
+        raw_compiled[_relative_key(path)] = {
+            "sha256": sha256_file(path),
+            "compiled_at": timestamp,
+            "capture_id": key,
+        }
+    save_state_atomic(state)
 
-    prompt = f"""You are a knowledge compiler. Your job is to read a daily conversation log
-and extract knowledge into structured wiki articles.
-
-## Schema (AGENTS.md)
-
-{schema}
-
-## Current Wiki Index
-
-{wiki_index}
-
-## Existing Wiki Articles
-
-{existing_articles_context if existing_articles_context else "(No existing articles yet)"}
-
-## Daily Log to Compile
-
-**File:** {log_path.name}
-
-{log_content}
-
-## Your Task
-
-Read the daily log above and compile it into wiki articles following the schema exactly.
-
-### Rules:
-
-1. **Extract key concepts** - Identify 3-7 distinct concepts worth their own article
-2. **Create concept articles** in `knowledge/concepts/` - One .md file per concept
-   - Use the exact article format from AGENTS.md (YAML frontmatter + sections)
-   - Include `sources:` in frontmatter pointing to the daily log file
-   - Use `[[concepts/slug]]` wikilinks to link to related concepts
-   - Write in encyclopedia style - neutral, comprehensive
-3. **Create connection articles** in `knowledge/connections/` if this log reveals non-obvious
-   relationships between 2+ existing concepts
-4. **Update existing articles** if this log adds new information to concepts already in the wiki
-   - Read the existing article, add the new information, add the source to frontmatter
-5. **Update knowledge/index.md** - Add new entries to the table
-   - Each entry: `| [[path/slug]] | One-line summary | source-file | {timestamp[:10]} |`
-6. **Append to knowledge/log.md** - Add a timestamped entry:
-   ```
-   ## [{timestamp}] compile | {log_path.name}
-   - Source: daily/{log_path.name}
-   - Articles created: [[concepts/x]], [[concepts/y]]
-   - Articles updated: [[concepts/z]] (if any)
-   ```
-
-### File paths:
-- Write concept articles to: {CONCEPTS_DIR}
-- Write connection articles to: {CONNECTIONS_DIR}
-- Update index at: {KNOWLEDGE_DIR / 'index.md'}
-- Append log at: {KNOWLEDGE_DIR / 'log.md'}
-
-### Quality standards:
-- Every article must have complete YAML frontmatter
-- Every article must link to at least 2 other articles via [[wikilinks]]
-- Key Points section should have 3-5 bullet points
-- Details section should have 2+ paragraphs
-- Related Concepts section should have 2+ entries
-- Sources section should cite the daily log with specific claims extracted
-"""
-
-    cost = 0.0
-
-    try:
-        async for message in query(
-            prompt=prompt,
-            options=ClaudeAgentOptions(
-                cwd=str(ROOT_DIR),
-                system_prompt={"type": "preset", "preset": "claude_code"},
-                allowed_tools=["Read", "Write", "Edit", "Glob", "Grep"],
-                permission_mode="acceptEdits",
-                max_turns=30,
-                model=os.environ.get("CMC_MODEL", "sonnet"),
-            ),
-        ):
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        pass  # compilation output - LLM writes files directly
-            elif isinstance(message, ResultMessage):
-                cost = message.total_cost_usd or 0.0
-                print(f"  Cost: ${cost:.4f}")
-    except Exception as e:
-        print(f"  Error: {e}")
-    finally:
-        if cost > 0:
-            rel_path = log_path.name
-            state.setdefault("ingested", {})[rel_path] = {
-                "hash": file_hash(log_path),
-                "compiled_at": now_iso(),
-                "cost_usd": cost,
-            }
-            state["total_cost"] = state.get("total_cost", 0.0) + cost
-            save_state(state)
-
-    return cost
+    if normalize_index_file():
+        print("  Repaired index.md formatting.")
+    refresh_projection()
+    print("  Done.")
+    return True
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Compile daily logs into knowledge articles")
-    parser.add_argument("--all", action="store_true", help="Force recompile all logs")
-    parser.add_argument("--file", type=str, help="Compile a specific daily log file")
-    parser.add_argument("--dry-run", action="store_true", help="Show what would be compiled")
-    args = parser.parse_args()
+# ── CLI ───────────────────────────────────────────────────────────────
 
-    state = load_state()
 
-    # Determine which files to compile
-    if args.file:
-        target = Path(args.file)
-        if not target.is_absolute():
-            target = DAILY_DIR / target.name
-        if not target.exists():
-            # Try resolving relative to project root
-            target = ROOT_DIR / args.file
-        if not target.exists():
-            print(f"Error: {args.file} not found")
-            sys.exit(1)
-        to_compile = [target]
-    else:
-        all_logs = list_raw_files()
-        if args.all:
-            to_compile = all_logs
+def _resolve_record_file(argument: str) -> Path:
+    target = Path(argument)
+    candidates = [target] if target.is_absolute() else [Path.cwd() / target, ROOT_DIR / target]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    print(f"Error: {argument} not found")
+    sys.exit(1)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Compile pending Capture Records into knowledge articles"
+    )
+    parser.add_argument("--all", action="store_true", help="Recompile every narrative Capture Record")
+    parser.add_argument("--file", type=str, help="Compile one specific Capture Record file")
+    parser.add_argument("--dry-run", action="store_true", help="Show assignments without compiling")
+    args = parser.parse_args(argv)
+
+    failed: list[str] = []
+    with compile_lock():
+        # The lock is held from the first state read through the last save so
+        # two serialized compiles can never load a snapshot ahead of the lock
+        # and replay work against stale state. Dry runs share the same locked
+        # snapshot but never mutate anything.
+        state = load_state()
+        records = list_capture_records()
+
+        if args.file:
+            target = _resolve_record_file(args.file)
+            record = read_capture(target)
+            if record.capture_status != SUBSTANTIVE_STATUS:
+                name = target.name
+                status = record.capture_status
+                print(f"Skipping {name}: capture_status={status} (not substantive)")
+                return 0
+            pending = [record]
         else:
-            to_compile = []
-            for log_path in all_logs:
-                rel = log_path.name
-                prev = state.get("ingested", {}).get(rel, {})
-                if not prev or prev.get("hash") != file_hash(log_path):
-                    to_compile.append(log_path)
+            bootstrapped = bootstrap_legacy_compiles(records, state)
+            if bootstrapped:
+                print(f"Bootstrapped {bootstrapped} historical Capture Records as compiled.")
+                if not args.dry_run:
+                    save_state_atomic(state)
+            pending = select_pending(records, state, force=args.all)
 
-    if not to_compile:
-        print("Nothing to compile - all daily logs are up to date.")
-        return
+        if not pending:
+            print("Nothing to compile - all substantive Capture Records are up to date.")
+            return 0
 
-    print(f"{'[DRY RUN] ' if args.dry_run else ''}Files to compile ({len(to_compile)}):")
-    for f in to_compile:
-        print(f"  - {f.name}")
+        assignments = assign_models(pending)
+        attachments = {} if args.file else plan_raw_attachments(pending, state)
 
-    if args.dry_run:
-        return
+        label = "[DRY RUN] " if args.dry_run else ""
+        print(f"{label}Records to compile ({len(assignments)}):")
+        for record, model in assignments:
+            raw_count = len(attachments.get(capture_state_key(record), ()))
+            print(f"  - {record.path.name} -> {model} (+{raw_count} raw)")
+        if args.dry_run:
+            return 0
 
-    # Compile each file sequentially
-    total_cost = 0.0
-    for i, log_path in enumerate(to_compile, 1):
-        print(f"\n[{i}/{len(to_compile)}] Compiling {log_path.name}...")
-        cost = asyncio.run(compile_daily_log(log_path, state))
-        total_cost += cost
-        print(f"  Done.")
+        for record, model in assignments:
+            ok = compile_record(
+                record, model, attachments.get(capture_state_key(record), ()), state
+            )
+            if not ok:
+                failed.append(record.path.name)
 
-    articles = list_wiki_articles()
-    print(f"\nCompilation complete. Total cost: ${total_cost:.2f}")
-    print(f"Knowledge base: {len(articles)} articles")
+    if failed:
+        print("\nCompilation failed for: " + ", ".join(failed), file=sys.stderr)
+        return 1
+    print(f"\nCompilation complete: {len(assignments)} records compiled.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
