@@ -52,8 +52,16 @@ def slugify(text: str) -> str:
 # ── Wikilink helpers ──────────────────────────────────────────────────
 
 def extract_wikilinks(content: str) -> list[str]:
-    """Extract all [[wikilinks]] from markdown content."""
-    return re.findall(r"\[\[([^\]]+)\]\]", content)
+    """Extract all [[wikilinks]] from markdown content.
+
+    Obsidian display aliases (``[[path|alias]]``) are stripped: the part after
+    the pipe is render-time text only and must not become part of the target
+    lookup (a file named ``path|alias.md`` never exists).
+    """
+    return [
+        link.split("|", 1)[0].strip()
+        for link in re.findall(r"\[\[([^\]]+)\]\]", content)
+    ]
 
 
 def wiki_article_exists(link: str) -> bool:
@@ -111,7 +119,11 @@ def count_inbound_links(target: str, exclude_file: Path | None = None) -> int:
         if article == exclude_file:
             continue
         content = article.read_text(encoding="utf-8")
-        if f"[[{target}]]" in content:
+        # Accept both the plain [[target]] form and an aliased
+        # [[target|display]] form: with an alias the exact-string search
+        # below would miss the link and make an aliased-only article look
+        # orphaned.
+        if f"[[{target}]]" in content or f"[[{target}|" in content:
             count += 1
     return count
 
